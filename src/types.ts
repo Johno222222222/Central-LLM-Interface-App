@@ -110,6 +110,9 @@ export interface CatalogModel {
   loaded: boolean;
   keySaved: boolean;
   sourceLabel?: string;
+  contextMax?: number;
+  contextAuto?: number;
+  mmprojPath?: string | null;
 }
 
 export interface ProviderStatus {

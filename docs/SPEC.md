@@ -301,6 +301,8 @@ Each slice below is meant to be one cloud-agent run. Stop when that slice's acce
 | Milestone | Focus | Runs |
 | --- | --- | --- |
 | v0.1 | App shell, Chat, and a Windows installer | 5 |
+| v0.1.1 | Tools menu and extra GGUF folders | 1 |
+| v0.1.2 | Context, hidden tools, vision projectors, message actions | 1 |
 | v0.2 | Create with ComfyUI import | 4 |
 | v0.3 | Models browser | 2 |
 | Later | Benchmark, voice, code, tools, then Mac and Linux | As needed |
@@ -341,7 +343,20 @@ Those names are reserved. They are not implemented in v0.1.1.
 
 **Extra model folders.** Settings can add more GGUF folders. The app scans them next to its own models folder and does not copy the files. An Import from Locally Uncensored action looks for `%APPDATA%\Locally Uncensored\models`, and for a GGUF folder named in `%APPDATA%\locally-uncensored\config.json`. If neither is there, the user browses to the folder. Models from those folders show up in the chat picker and load through the bundled llama-server by absolute path. Moving them into the app folder is a later step, so extra folders stay a separate list from the app's own models folder.
 
-### Soon after v0.1.1: app awareness
+### v0.1.2 Polish
+
+From a real Windows test on an RTX 5070 with 12 GB. This stays inside chat and the local server. App awareness is still the next milestone, then v0.2 Create.
+
+- The bundled llama-server picks a context from VRAM and model size. A 9B Q4_K_M on 12 GB gets about 32K, not the old 8.2K default. Settings and the chat meter have a per-model slider. The choice is saved, the server restarts when it changes, and the token pill shows that window.
+- Screenshot captures the screen in the app process. Shell, screenshot, and MCP never open a console window.
+- Installing over a running copy stops the app and llama-server first, so `llama.dll` is not locked. Closing the app, or a crash, also ends the bundled server: it runs in a Windows job that dies when the app process does.
+- Approving a drive root such as `C:\` covers every path on that drive. The check ignores case, slash direction, and a trailing separator.
+- A matching `mmproj*.gguf` next to a vision model, or in another scanned folder, is passed to llama-server. A picture sent to a model that cannot see it gets a plain explanation.
+- HTTP 402 and similar credit errors name the provider and where to top up. DeepSeek points at its own site or OpenRouter.
+- Tool schemas stay short. Long file listings are cut down. When tools are on, the model is told the exact approved folders.
+- User messages can be copied or edited. An edit resends from that point and drops the later turns. Assistant messages can be copied, retried (with another model if wanted), branched into a new chat, or marked up or down with an optional note. Feedback stays on this computer, and Settings can export it.
+
+### Next, after v0.1.2: app awareness
 
 Chat models can read this app's own state and, with a yes on each change, update settings.
 

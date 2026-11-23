@@ -11,7 +11,7 @@ use std::time::Duration;
 use central_llm_core::{AppSettings, Store};
 use tauri::Manager;
 
-use crate::runtime::{apply_health, health_snapshot, probe_origin, sync_runtime};
+use crate::runtime::{apply_health, health_snapshot, probe_origin, stop, sync_runtime};
 use std::sync::atomic::AtomicBool;
 
 pub struct AppState {
@@ -59,8 +59,14 @@ pub fn run() {
                     .ok()
                     .and_then(|store| store.get_settings().ok());
                 if let Some(settings) = settings {
+                    let overrides = state
+                        .store
+                        .lock()
+                        .ok()
+                        .and_then(|store| store.model_context_overrides().ok())
+                        .unwrap_or_default();
                     if let Ok(mut process) = state.llama.lock() {
-                        let _ = sync_runtime(&handle, &mut process, &settings);
+                        let _ = sync_runtime(&handle, &mut process, &settings, &overrides);
                     }
                     let snapshot = state
                         .llama
@@ -100,6 +106,12 @@ pub fn run() {
             commands::update_chat_settings,
             commands::stage_attachment,
             commands::send_message,
+            commands::edit_message,
+            commands::regenerate_message,
+            commands::branch_chat,
+            commands::save_feedback,
+            commands::export_feedback,
+            commands::set_model_context,
             commands::stop_generation,
             commands::resolve_tool_approval,
             commands::detect_lu_folder,
@@ -108,6 +120,15 @@ pub fn run() {
             commands::clear_web_search_key,
             commands::test_web_search,
         ])
-        .run(tauri::generate_context!())
-        .expect("Central LLM Interface App failed to start");
+        .build(tauri::generate_context!())
+        .expect("Central LLM Interface App failed to start")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut process) = state.llama.lock() {
+                        stop(&mut process);
+                    }
+                }
+            }
+        });
 }

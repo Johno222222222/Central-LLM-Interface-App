@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use central_llm_core::{
-    bundled_origin, llama_command_args, scan_all_model_dirs, write_models_preset, AppSettings,
-    LlamaLaunch, DEFAULT_PORT, VRAM_MARGIN_MIB,
+    bundled_origin, collect_projectors, fit_local_models, llama_command_args, scan_all_model_dirs,
+    write_models_preset, AppSettings, CatalogModel, LlamaLaunch, DEFAULT_PORT, DEFAULT_VRAM_BYTES,
+    VRAM_MARGIN_MIB,
 };
 use tauri::{AppHandle, Manager};
 
@@ -36,24 +38,81 @@ impl LlamaProcess {
 
 impl Drop for LlamaProcess {
     fn drop(&mut self) {
-        stop_child(&mut self.child);
+        stop(self);
     }
+}
+
+/// Stop the bundled server. On Windows the process is also in a job that
+/// Windows kills when this process exits, including a crash or a forced close.
+pub fn stop(process: &mut LlamaProcess) {
+    stop_child(&mut process.child);
+    process.running = false;
 }
 
 pub fn force_restart(process: &mut LlamaProcess) {
     process.fingerprint.clear();
-    stop_child(&mut process.child);
-    process.running = false;
+    stop(process);
+}
+
+pub fn prepared_models(
+    settings: &AppSettings,
+    overrides: &HashMap<String, u32>,
+) -> Vec<CatalogModel> {
+    let mut models = scan_all_model_dirs(
+        Path::new(&settings.models_dir),
+        &settings.extra_model_dirs,
+    );
+    let projectors = collect_projectors(Path::new(&settings.models_dir), &settings.extra_model_dirs);
+    fit_local_models(&mut models, &projectors, detect_vram_bytes(), overrides);
+    models
+}
+
+pub fn detect_vram_bytes() -> u64 {
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=memory.total",
+        "--format=csv,noheader,nounits",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let Ok(output) = command.output() else {
+        return DEFAULT_VRAM_BYTES;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|part| part.parse::<u64>().ok())
+        .filter(|mib| *mib >= 1024)
+        .map(|mib| mib * 1024 * 1024)
+        .unwrap_or(DEFAULT_VRAM_BYTES)
 }
 
 pub fn sync_runtime(
     app: &AppHandle,
     process: &mut LlamaProcess,
     settings: &AppSettings,
+    overrides: &HashMap<String, u32>,
 ) -> Result<(), String> {
     let custom = normalize_origin(&settings.llama_server_url);
+    let models = prepared_models(settings, overrides);
+    let fitted = models
+        .iter()
+        .filter(|model| model.provider == central_llm_core::ProviderId::Local)
+        .map(|model| {
+            format!(
+                "{}={} {}",
+                model.id,
+                model.context_limit,
+                model.mmproj_path.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
     let fingerprint = format!(
-        "{custom}|{}|{}|{}|{}",
+        "{custom}|{}|{}|{}|{}|{fitted}",
         settings.models_dir,
         settings.extra_model_dirs.join(";"),
         settings.context_length,
@@ -100,8 +159,6 @@ pub fn sync_runtime(
         .ok()
         .map(|dir| dir.join("models-preset.ini"));
     if let Some(preset_path) = &preset {
-        let models =
-            scan_all_model_dirs(Path::new(&settings.models_dir), &settings.extra_model_dirs);
         write_models_preset(
             preset_path,
             &models,
@@ -146,6 +203,8 @@ pub fn sync_runtime(
     }
     match command.spawn() {
         Ok(child) => {
+            #[cfg(windows)]
+            assign_kill_on_close(&child);
             process.child = Some(child);
             process.running = true;
             process.fingerprint = fingerprint;
@@ -259,12 +318,57 @@ fn stop_child(slot: &mut Option<Child>) {
     };
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let _ = Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x08000000)
             .output();
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Keep llama-server in a job that dies with this process.
+/// The handle stays open until the process itself exits, so a crash still
+/// closes it and Windows kills the server.
+#[cfg(windows)]
+fn assign_kill_on_close(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JobObjectExtendedLimitInformation,
+    };
+
+    static JOB: OnceLock<isize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return 0;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of_val(&info) as u32,
+        );
+        if configured == 0 {
+            return 0;
+        }
+        job as isize
+    });
+    if job == 0 {
+        return;
+    }
+    unsafe {
+        let _ = AssignProcessToJobObject(
+            job as *mut std::ffi::c_void,
+            child.as_raw_handle(),
+        );
+    }
 }
 
 pub fn validate_origin(value: &str) -> Result<(), String> {

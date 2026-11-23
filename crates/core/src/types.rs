@@ -338,6 +338,27 @@ pub struct CatalogModel {
     /// Where a local file was found, such as "App folder" or "Locally Uncensored".
     #[serde(default)]
     pub source_label: String,
+    /// Largest context the slider offers, usually the model's training window.
+    #[serde(default)]
+    pub context_max: u32,
+    /// Context the app would pick from VRAM and model size, before a manual override.
+    #[serde(default)]
+    pub context_auto: u32,
+    /// Matching vision projector, when one was found beside the model.
+    #[serde(default)]
+    pub mmproj_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackEntry {
+    pub id: String,
+    pub chat_id: String,
+    pub message_id: String,
+    pub rating: String,
+    pub note: String,
+    pub model_id: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

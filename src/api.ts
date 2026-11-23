@@ -79,6 +79,12 @@ export const api = {
   updateChatSettings,
   stageAttachment,
   sendMessage,
+  editMessage,
+  regenerateMessage,
+  branchChat,
+  saveFeedback,
+  exportFeedback,
+  setModelContext,
   stopGeneration,
   resolveToolApproval,
   detectLuFolder,
@@ -198,7 +204,7 @@ async function createChat(provider: ProviderId, modelId: string): Promise<Chat> 
       messages: [],
       settings: defaultChatSettings(),
       contextUsed: 0,
-      contextLimit: provider === "local" ? preview.settings.contextLength : 128000,
+      contextLimit: provider === "local" ? localContext(modelId) : 128000,
     };
     preview.chats.unshift(chat);
     return structuredClone(chat);
@@ -219,7 +225,7 @@ async function updateChatModel(id: string, provider: ProviderId, modelId: string
     const chat = mustChat(id);
     chat.provider = provider;
     chat.modelId = modelId;
-    chat.contextLimit = provider === "local" ? preview.settings.contextLength : 128000;
+    chat.contextLimit = provider === "local" ? localContext(modelId) : 128000;
     chat.updatedAt = new Date().toISOString();
     return structuredClone(chat);
   }
@@ -290,6 +296,57 @@ async function testWebSearch(): Promise<string> {
   return invoke("test_web_search");
 }
 
+async function editMessage(chatId: string, messageId: string, content: string): Promise<SendStarted> {
+  if (!isTauri()) return previewEdit(chatId, messageId, content);
+  return invoke("edit_message", { chatId, messageId, content });
+}
+
+async function regenerateMessage(
+  chatId: string,
+  messageId: string,
+  modelId?: string,
+  provider?: ProviderId,
+): Promise<SendStarted> {
+  if (!isTauri()) return previewRegenerate(chatId, messageId, modelId, provider);
+  return invoke("regenerate_message", { chatId, messageId, modelId, provider });
+}
+
+async function branchChat(chatId: string, messageId: string): Promise<Chat> {
+  if (!isTauri()) return previewBranch(chatId, messageId);
+  return invoke("branch_chat", { chatId, messageId });
+}
+
+async function saveFeedback(
+  chatId: string,
+  messageId: string,
+  rating: "up" | "down",
+  note: string,
+): Promise<void> {
+  if (!isTauri()) {
+    preview.feedback.push({ chatId, messageId, rating, note, modelId: mustChat(chatId).modelId });
+    return;
+  }
+  await invoke("save_feedback", { chatId, messageId, rating, note });
+}
+
+async function exportFeedback(): Promise<string> {
+  if (!isTauri()) return JSON.stringify(preview.feedback, null, 2);
+  return invoke("export_feedback");
+}
+
+async function setModelContext(modelId: string, context: number): Promise<CatalogModel> {
+  if (!isTauri()) {
+    const model = preview.models.find((item) => item.id === modelId);
+    if (!model) throw new Error("That model is not in a scanned folder.");
+    model.contextLimit = context;
+    for (const chat of preview.chats) {
+      if (chat.modelId === modelId && chat.provider === "local") chat.contextLimit = context;
+    }
+    return structuredClone(model);
+  }
+  return invoke("set_model_context", { modelId, context });
+}
+
 async function stopGeneration(chatId: string): Promise<void> {
   if (!isTauri()) {
     const timer = preview.timers.get(chatId);
@@ -317,6 +374,93 @@ function mustChat(id: string): Chat {
   const chat = preview.chats.find((item) => item.id === id);
   if (!chat) throw new Error("That chat is not on this computer.");
   return chat;
+}
+
+function localContext(modelId: string): number {
+  return preview.models.find((model) => model.id === modelId)?.contextLimit ?? preview.settings.contextLength;
+}
+
+function previewEdit(chatId: string, messageId: string, content: string): SendStarted {
+  const chat = mustChat(chatId);
+  const index = chat.messages.findIndex((message) => message.id === messageId);
+  if (index < 0) throw new Error("That message is no longer in the chat.");
+  chat.messages[index].content = content.trim();
+  chat.messages = chat.messages.slice(0, index + 1);
+  const assistant = message("assistant", "", []);
+  assistant.provider = chat.provider;
+  assistant.modelId = chat.modelId;
+  chat.messages.push(assistant);
+  streamPreview(chat, assistant, "Edited and resent.");
+  return { user: chat.messages[index], assistant, title: chat.title };
+}
+
+function previewRegenerate(
+  chatId: string,
+  messageId: string,
+  modelId?: string,
+  provider?: ProviderId,
+): SendStarted {
+  const chat = mustChat(chatId);
+  if (modelId) {
+    chat.modelId = modelId;
+    if (provider) chat.provider = provider;
+    chat.contextLimit = provider === "local" || !provider ? localContext(modelId) : 128000;
+  }
+  const index = chat.messages.findIndex((message) => message.id === messageId);
+  if (index < 0) throw new Error("That message is no longer in the chat.");
+  chat.messages = chat.messages.slice(0, index);
+  const user = [...chat.messages].reverse().find((item) => item.role === "user");
+  if (!user) throw new Error("There is no message to resend.");
+  const assistant = message("assistant", "", []);
+  assistant.provider = chat.provider;
+  assistant.modelId = chat.modelId;
+  chat.messages.push(assistant);
+  streamPreview(chat, assistant, "Regenerated reply.");
+  return { user, assistant, title: chat.title };
+}
+
+function previewBranch(chatId: string, messageId: string): Chat {
+  const source = mustChat(chatId);
+  const index = source.messages.findIndex((message) => message.id === messageId);
+  if (index < 0) throw new Error("That message is no longer in the chat.");
+  const chat: Chat = {
+    ...structuredClone(source),
+    id: crypto.randomUUID(),
+    title: `${source.title} (branch)`,
+    messages: source.messages.slice(0, index + 1).map((item) => ({ ...item, id: crypto.randomUUID() })),
+  };
+  preview.chats.unshift(chat);
+  return structuredClone(chat);
+}
+
+function streamPreview(chat: Chat, assistant: ChatMessage, reply: string) {
+  let cursor = 0;
+  const timer = window.setInterval(() => {
+    const piece = reply.slice(cursor, cursor + 12);
+    cursor += 12;
+    assistant.content += piece;
+    for (const listener of listeners) {
+      listener.onDelta({ chatId: chat.id, messageId: assistant.id, text: piece, thinking: "" });
+    }
+    if (cursor >= reply.length) {
+      window.clearInterval(timer);
+      preview.timers.delete(chat.id);
+      chat.contextUsed = estimateTokens(chat.messages.map((item) => item.content).join(""));
+      for (const listener of listeners) {
+        listener.onDone({
+          chatId: chat.id,
+          messageId: assistant.id,
+          text: reply,
+          thinking: "",
+          title: chat.title,
+          contextUsed: estimateTokens(reply),
+          contextLimit: chat.contextLimit,
+          cancelled: false,
+        });
+      }
+    }
+  }, 40);
+  preview.timers.set(chat.id, timer);
 }
 
 function previewSend(chatId: string, content: string, attachmentPaths: string[]): SendStarted {
@@ -438,7 +582,9 @@ const preview = {
       name: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       provider: "local",
       family: "Qwen",
-      contextLimit: 8192,
+      contextLimit: 32768,
+      contextAuto: 32768,
+      contextMax: 131072,
       installed: true,
       path: "C:\\Users\\Johno\\AppData\\Roaming\\app.central-llm-interface\\models\\Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       loaded: false,
@@ -449,7 +595,9 @@ const preview = {
       name: "Llama-3.1-8B-Instruct-Q4_K_M.gguf",
       provider: "local",
       family: "Llama",
-      contextLimit: 8192,
+      contextLimit: 32768,
+      contextAuto: 32768,
+      contextMax: 131072,
       installed: true,
       loaded: false,
       keySaved: true,
@@ -470,7 +618,7 @@ const preview = {
       modelId: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
       provider: "local",
       contextUsed: 220,
-      contextLimit: 8192,
+      contextLimit: 32768,
       settings: defaultChatSettings(),
       messages: [
         {
@@ -495,6 +643,7 @@ const preview = {
     },
   ] as Chat[],
   timers: new Map<string, number>(),
+  feedback: [] as { chatId: string; messageId: string; rating: string; note: string; modelId: string }[],
 };
 
 function hosted(provider: ProviderId, family: string, id: string): CatalogModel {

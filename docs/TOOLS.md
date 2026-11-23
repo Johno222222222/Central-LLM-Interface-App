@@ -23,6 +23,13 @@ The chat loop already streams tool calls, runs the handler, and shows each step 
 
 Leave the tool off by default when it can read private files or run a command.
 
+## Behavior the handlers already share
+
+- On Windows every child process is created with `CREATE_NO_WINDOW`. Screenshot does not start PowerShell. It copies the primary screen with GDI and writes a BMP.
+- `path_is_inside` treats a drive root as the whole drive. `C:\` contains `C:\Users\Public\ComfyUI`. Comparison is case-insensitive and ignores slash style and a trailing separator. The path does not have to exist yet.
+- File listings returned to the model are capped at 60 names and 4,000 characters. File reads are capped at 8,000 characters.
+- When any tool is enabled, the request starts with a short system note that lists the approved folders. The model is told not to invent paths outside that list.
+
 ## Reserved names
 
 These names are already in `approval_for` and are not built yet. Use them when their milestone arrives so the approval behavior stays the same.

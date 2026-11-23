@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { api, isTauri } from "../api";
 import { applyTheme } from "../theme";
-import { PROVIDERS, type AppSettings, type Appearance, type ProviderId, type ProviderStatus, type RuntimeStatus } from "../types";
+import { PROVIDERS, type AppSettings, type Appearance, type CatalogModel, type ProviderId, type ProviderStatus, type RuntimeStatus } from "../types";
+import { contextSteps } from "../components/MessageView";
+import { formatTokens } from "../lib/chatText";
 
 export function SettingsScreen() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -146,7 +148,7 @@ export function SettingsScreen() {
             />
           </label>
           <p className="hint">
-            The bundled server keeps one model loaded and leaves about 2 GB of VRAM free on a 12 GB card.
+            This number is only the fallback. Each local model gets its own context from VRAM and file size. A 9B Q4 on 12 GB lands near 32K. Changing a model slider restarts the bundled server.
           </p>
           <div className="button-row">
             <button type="button" className="primary" onClick={() => void saveRuntime()}>
@@ -176,6 +178,31 @@ export function SettingsScreen() {
           </div>
         </section>
 
+        <ModelContext onNotice={setNotice} />
+
+        <section className="card">
+          <h2>Feedback</h2>
+          <p className="hint">Thumbs on an assistant reply are stored on this computer.</p>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => {
+              void api.exportFeedback().then((json) => {
+                const blob = new Blob([json], { type: "application/json" });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = "central-llm-feedback.json";
+                link.click();
+                URL.revokeObjectURL(url);
+                setNotice("Exported feedback.");
+              });
+            }}
+          >
+            Export feedback
+          </button>
+        </section>
+
         <ExtraFolders settings={settings} onChange={setSettings} onNotice={setNotice} />
         <WebSearchCard />
         <ApprovedFolders settings={settings} onChange={setSettings} />
@@ -198,6 +225,51 @@ export function SettingsScreen() {
         {notice ? <p className="hint">{notice}</p> : null}
       </div>
     </main>
+  );
+}
+
+function ModelContext({ onNotice }: { onNotice: (text: string) => void }) {
+  const [models, setModels] = useState<CatalogModel[]>([]);
+  useEffect(() => {
+    void api.listModels().then((catalog) => setModels(catalog.filter((model) => model.provider === "local")));
+  }, []);
+  if (models.length === 0) return null;
+  return (
+    <section className="card">
+      <h2>Context per model</h2>
+      <p className="hint">The token pill uses this window. Moving a slider saves it and restarts the local server.</p>
+      {models.map((model) => {
+        const steps = contextSteps(model.contextMax || model.contextLimit);
+        const index = Math.max(0, steps.indexOf(model.contextLimit));
+        return (
+          <label key={model.id} className="field">
+            {model.name}
+            <span className="hint">
+              {formatTokens(model.contextLimit)}
+              {model.contextAuto ? ` · auto ${formatTokens(model.contextAuto)}` : ""}
+              {model.mmprojPath ? " · vision projector found" : ""}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={steps.length - 1}
+              step={1}
+              value={index}
+              onChange={(event) => {
+                const next = steps[Number(event.target.value)] ?? model.contextLimit;
+                void api
+                  .setModelContext(model.id, next)
+                  .then((updated) => {
+                    setModels((list) => list.map((item) => (item.id === updated.id ? updated : item)));
+                    onNotice(`${model.name} is using ${formatTokens(updated.contextLimit)}.`);
+                  })
+                  .catch((reason: unknown) => onNotice(reason instanceof Error ? reason.message : String(reason)));
+              }}
+            />
+          </label>
+        );
+      })}
+    </section>
   );
 }
 
