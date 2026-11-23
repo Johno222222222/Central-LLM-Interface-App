@@ -32,6 +32,7 @@ export interface ToolToggles {
   shell: boolean;
   screenshot: boolean;
   mcp: boolean;
+  app: boolean;
 }
 
 export interface ToolStep {
@@ -189,6 +190,7 @@ export function defaultChatSettings(): ChatSettings {
       shell: false,
       screenshot: false,
       mcp: false,
+      app: true,
     },
   };
 }
@@ -200,4 +202,5 @@ export const TOOL_TOGGLES: { key: keyof ToolToggles; label: string; hint: string
   { key: "shell", label: "Shell", hint: "You approve each command" },
   { key: "screenshot", label: "Screenshot", hint: "Capture the primary screen" },
   { key: "mcp", label: "MCP", hint: "Servers from Settings" },
+  { key: "app", label: "App", hint: "Read this app. Changes ask first" },
 ];

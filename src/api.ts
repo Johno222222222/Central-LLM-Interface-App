@@ -12,6 +12,7 @@ import {
   type ChatMessage,
   type ChatSettings,
   type ChatSummary,
+  type ScreenId,
   type ProviderId,
   type ProviderStatus,
   type RuntimeStatus,
@@ -86,6 +87,7 @@ export const api = {
   exportFeedback,
   setModelContext,
   stopGeneration,
+  setUiState,
   resolveToolApproval,
   detectLuFolder,
   webSearchStatus,
@@ -345,6 +347,27 @@ async function setModelContext(modelId: string, context: number): Promise<Catalo
     return structuredClone(model);
   }
   return invoke("set_model_context", { modelId, context });
+}
+
+async function setUiState(screen: string, focus: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("set_ui_state", { screen, focus });
+}
+
+export async function onAppNavigate(
+  handler: (tab: ScreenId, focus: string) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const unlisten = await listen<{ tab: ScreenId; focus?: string }>("app-navigate", (event) => {
+    handler(event.payload.tab, event.payload.focus ?? "");
+  });
+  return unlisten;
+}
+
+export async function onSettingsChanged(handler: () => void): Promise<() => void> {
+  if (!isTauri()) return () => {};
+  const unlisten = await listen("app-settings-changed", () => handler());
+  return unlisten;
 }
 
 async function stopGeneration(chatId: string): Promise<void> {

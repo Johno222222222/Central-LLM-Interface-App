@@ -40,6 +40,7 @@ pub async fn run_tool(
     name: &str,
     arguments: &str,
     settings: &AppSettings,
+    chat_id: &str,
 ) -> String {
     let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
     if let Some(rest) = name.strip_prefix("mcp_") {
@@ -77,6 +78,14 @@ pub async fn run_tool(
                 .unwrap_or(""),
         ),
         "screenshot" => screenshot(&app.state::<AppState>().data_dir),
+        "get_app_state" => crate::app_tools::app_state_text(app, chat_id),
+        "list_settings" => crate::app_tools::settings_text(app, chat_id),
+        "list_models" => crate::app_tools::models_text(app),
+        "list_threads" => crate::app_tools::threads_text(app),
+        "get_server_status" => crate::app_tools::server_status_text(app),
+        "update_settings" => crate::app_tools::apply_setting_change(app, chat_id, arguments)
+            .unwrap_or_else(|error| error),
+        "open_tab" => crate::app_tools::open_tab(app, arguments),
         _ => format!("Unknown tool {name}."),
     }
 }

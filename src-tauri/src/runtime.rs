@@ -90,6 +90,24 @@ pub fn detect_vram_bytes() -> u64 {
         .unwrap_or(DEFAULT_VRAM_BYTES)
 }
 
+pub fn detect_vram_used_mib() -> Option<u32> {
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=memory.used",
+        "--format=csv,noheader,nounits",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output().ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|part| part.parse::<u32>().ok())
+}
+
 pub fn sync_runtime(
     app: &AppHandle,
     process: &mut LlamaProcess,

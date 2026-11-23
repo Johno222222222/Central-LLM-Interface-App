@@ -164,6 +164,9 @@ pub struct ToolToggles {
     pub screenshot: bool,
     #[serde(default)]
     pub mcp: bool,
+    /// Reads about this app. On unless the user turns the App group off.
+    #[serde(default = "default_true")]
+    pub app: bool,
 }
 
 impl Default for ToolToggles {
@@ -175,6 +178,7 @@ impl Default for ToolToggles {
             shell: false,
             screenshot: false,
             mcp: false,
+            app: true,
         }
     }
 }

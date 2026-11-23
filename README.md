@@ -41,7 +41,7 @@ If you already run llama-server yourself, paste its URL under **Local runtime** 
 - An empty account (HTTP 402) says which provider is out of credit.
 - Hover a message for Copy. User messages can be edited and resent. Assistant messages can be retried, branched, or marked up or down. Export feedback is in Settings.
 
-The next milestone is still app-awareness tools, then v0.2 Create with ComfyUI.
+App tools, on by default in the Tools menu, let a chat read the open tab, settings, models, chats, and the local server. A settings change shows the old and new value and waits for Approve. It cannot see or write API keys, and it cannot turn on Shell or Files. The next milestone is v0.2 Create with ComfyUI. Desktop control stays later.
 
 ## Run from source
 

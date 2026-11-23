@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { api, onAppNavigate, onSettingsChanged } from "./api";
+import { applyTheme } from "./theme";
 import { ChatScreen } from "./screens/ChatScreen";
 import { PlaceholderScreen } from "./screens/PlaceholderScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
@@ -6,6 +8,29 @@ import { NAV, type ScreenId } from "./types";
 
 export function App() {
   const [screen, setScreen] = useState<ScreenId>("chat");
+  const [focus, setFocus] = useState("");
+  useEffect(() => {
+    void api.setUiState(screen, focus);
+  }, [screen, focus]);
+  useEffect(() => {
+    let stop = () => {};
+    void onAppNavigate((tab, nextFocus) => {
+      setScreen(tab);
+      setFocus(nextFocus);
+    }).then((unlisten) => {
+      stop = unlisten;
+    });
+    let stopSettings = () => {};
+    void onSettingsChanged(() => {
+      void api.getSettings().then((settings) => applyTheme(settings.appearance));
+    }).then((unlisten) => {
+      stopSettings = unlisten;
+    });
+    return () => {
+      stop();
+      stopSettings();
+    };
+  }, []);
   return (
     <div className="app">
       <header className="topnav">
@@ -48,7 +73,7 @@ export function App() {
             body="The model browser comes later. GGUF files you put in the models folder already appear in the chat picker."
           />
         ) : null}
-        {screen === "settings" ? <SettingsScreen /> : null}
+        {screen === "settings" ? <SettingsScreen focus={focus} /> : null}
       </div>
     </div>
   );

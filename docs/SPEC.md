@@ -303,6 +303,7 @@ Each slice below is meant to be one cloud-agent run. Stop when that slice's acce
 | v0.1 | App shell, Chat, and a Windows installer | 5 |
 | v0.1.1 | Tools menu and extra GGUF folders | 1 |
 | v0.1.2 | Context, hidden tools, vision projectors, message actions | 1 |
+| v0.1.3 | App awareness: read the app and approve setting changes | 1 |
 | v0.2 | Create with ComfyUI import | 4 |
 | v0.3 | Models browser | 2 |
 | Later | Benchmark, voice, code, tools, then Mac and Linux | As needed |
@@ -356,11 +357,19 @@ From a real Windows test on an RTX 5070 with 12 GB. This stays inside chat and t
 - Tool schemas stay short. Long file listings are cut down. When tools are on, the model is told the exact approved folders.
 - User messages can be copied or edited. An edit resends from that point and drops the later turns. Assistant messages can be copied, retried (with another model if wanted), branched into a new chat, or marked up or down with an optional note. Feedback stays on this computer, and Settings can export it.
 
-### Next, after v0.1.2: app awareness
+### v0.1.3 App awareness
 
-Chat models can read this app's own state and, with a yes on each change, update settings.
+Chat can look at this app and, with a yes on each change, update settings. The Tools menu has an App toggle that starts on. Reads do not ask. Desktop mouse and keyboard stay a later milestone. Next is v0.2 Create with ComfyUI.
 
-Read-only tools cover settings, installed models, imported workflows, and chats. They use the same registry as v0.1.1 and do not need an approval prompt to look. A change, such as turning a tool on, pointing at another models folder, or editing a provider, goes through `update_settings` and waits for the user to approve that specific change. The model sees the refusal if the user says no. Nothing here writes keys, deletes models, or starts a ComfyUI run.
+- `get_app_state` reports the open tab, selected model and provider, context size, enabled tools, approved folders, and the app version.
+- `list_settings` lists setting values with a short description of each. Provider keys are only "set" or "not set".
+- `list_models` lists local GGUF files with size, quant, mmproj, and folder, plus which cloud providers have a key.
+- `list_threads` lists chat titles and dates.
+- `get_server_status` reports llama-server state and VRAM in use.
+- `update_settings` changes one whitelisted setting: theme, context, GPU layers, sampling, the selected model, per-model context, tool toggles, and model folders. The chat shows the old value and the new value with Approve and Deny. It cannot write API keys, change approved folders, change how shell approval works, or turn Shell or Files on.
+- `open_tab` opens Chat, Create, Models, or Settings, and can scroll to a setting.
+
+Imported workflows wait for v0.2. Nothing here deletes models or starts a ComfyUI run.
 
 ### Near the end: desktop look-around and control
 

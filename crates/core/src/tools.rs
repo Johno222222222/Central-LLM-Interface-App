@@ -79,6 +79,68 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
             parameters: object_schema(json!({}), &[]),
             risky: false,
         },
+        ToolSpec {
+            name: "get_app_state".into(),
+            title: "App state".into(),
+            description: "Current tab, model, context, enabled tools, and version.".into(),
+            parameters: object_schema(json!({}), &[]),
+            risky: false,
+        },
+        ToolSpec {
+            name: "list_settings".into(),
+            title: "Settings".into(),
+            description: "Settings values. Provider keys are only set or not set.".into(),
+            parameters: object_schema(json!({}), &[]),
+            risky: false,
+        },
+        ToolSpec {
+            name: "list_models".into(),
+            title: "Models".into(),
+            description: "Local GGUF files and which cloud keys are saved.".into(),
+            parameters: object_schema(json!({}), &[]),
+            risky: false,
+        },
+        ToolSpec {
+            name: "list_threads".into(),
+            title: "Chats".into(),
+            description: "Chat titles and dates.".into(),
+            parameters: object_schema(json!({}), &[]),
+            risky: false,
+        },
+        ToolSpec {
+            name: "get_server_status".into(),
+            title: "Server".into(),
+            description: "llama-server status and VRAM in use.".into(),
+            parameters: object_schema(json!({}), &[]),
+            risky: false,
+        },
+        ToolSpec {
+            name: "update_settings".into(),
+            title: "Change setting".into(),
+            description: "Change one allowed setting. The user must approve.".into(),
+            parameters: object_schema(
+                json!({
+                    "setting": {"type": "string", "description": "appearance, contextLength, temperature, tool.webSearch, extraModelDirs, modelContext, model, provider"},
+                    "value": {"type": "string", "description": "New value"},
+                    "modelId": {"type": "string", "description": "Model id when setting is modelContext"}
+                }),
+                &["setting", "value"],
+            ),
+            risky: false,
+        },
+        ToolSpec {
+            name: "open_tab".into(),
+            title: "Open tab".into(),
+            description: "Open Chat, Create, Models, or Settings.".into(),
+            parameters: object_schema(
+                json!({
+                    "tab": {"type": "string", "enum": ["chat", "create", "models", "settings"]},
+                    "focus": {"type": "string", "description": "Optional setting to scroll to"}
+                }),
+                &["tab"],
+            ),
+            risky: false,
+        },
     ]
 }
 
@@ -97,6 +159,8 @@ pub fn tool_enabled(toggles: &ToolToggles, name: &str) -> bool {
         "shell" => toggles.shell,
         "screenshot" => toggles.screenshot,
         "mcp" => toggles.mcp,
+        "get_app_state" | "list_settings" | "list_models" | "list_threads"
+        | "get_server_status" | "update_settings" | "open_tab" => toggles.app,
         other => toggles.mcp && other.starts_with("mcp_"),
     }
 }
@@ -324,15 +388,19 @@ fn is_drive_root(normalized: &str) -> bool {
         && normalized.as_bytes()[0].is_ascii_alphabetic()
 }
 
-pub fn tool_guidance(approved_folders: &[String]) -> String {
+pub fn tool_guidance(approved_folders: &[String], include_app: bool) -> String {
     let folders = if approved_folders.is_empty() {
         "none approved yet".to_string()
     } else {
         approved_folders.join(", ")
     };
-    format!(
+    let mut text = format!(
         "Tools are available. The files tool can only read these approved folders: {folders}. Do not invent paths outside them. Keep listings short."
-    )
+    );
+    if include_app {
+        text.push_str(" You can inspect this app with get_app_state, list_settings, list_models, list_threads, and get_server_status.");
+    }
+    text
 }
 
 pub fn mcp_tool_name(server: &str, tool: &str) -> String {
@@ -513,8 +581,14 @@ mod tests {
     #[test]
     fn risky_tools_are_off_unless_toggled() {
         let toggles = ToolToggles::default();
-        assert!(enabled_builtin(&toggles).is_empty());
+        let defaults: Vec<_> = enabled_builtin(&toggles)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(defaults.contains(&"get_app_state".to_string()));
+        assert!(!defaults.iter().any(|name| name == "shell" || name == "files"));
         let mut on = toggles;
+        on.app = false;
         on.shell = true;
         on.web_search = true;
         let names: Vec<_> = enabled_builtin(&on)
@@ -569,10 +643,12 @@ mod tests {
 
     #[test]
     fn tool_guidance_names_approved_folders() {
-        let text = tool_guidance(&[r"C:\".into(), r"D:\".into()]);
+        let text = tool_guidance(&[r"C:\".into(), r"D:\".into()], true);
         assert!(text.contains(r"C:\"));
         assert!(text.contains(r"D:\"));
-        assert!(tool_guidance(&[]).contains("none approved"));
+        assert!(text.contains("get_app_state"));
+        assert!(tool_guidance(&[], false).contains("none approved"));
+        assert!(!tool_guidance(&[], false).contains("get_app_state"));
     }
 
     #[test]

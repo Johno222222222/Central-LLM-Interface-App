@@ -617,7 +617,13 @@ async fn run_stream(
     if !request.tools.is_empty() {
         request.messages.insert(
             0,
-            OutgoingMessage::text("system", tool_guidance(&settings.approved_folders)),
+            OutgoingMessage::text(
+                "system",
+                tool_guidance(
+                    &settings.approved_folders,
+                    request.tools.iter().any(|tool| tool.name == "get_app_state"),
+                ),
+            ),
         );
     }
     let mut steps: Vec<ToolStep> = Vec::new();
@@ -704,6 +710,23 @@ async fn run_stream(
                 status: "running".into(),
             };
             if central_llm_core::needs_command_approval(&call.name) {
+                if call.name == "update_settings" {
+                    match crate::app_tools::describe_setting_change(&app, &chat_id, &call.arguments)
+                    {
+                        Ok(summary) => step.arguments = summary,
+                        Err(reason) => {
+                            step.status = "error".into();
+                            step.result = Some(reason.clone());
+                            steps.push(step.clone());
+                            emit_step(&app, &chat_id, &assistant_id, &step);
+                            let mut rejected = OutgoingMessage::text("tool", reason);
+                            rejected.tool_call_id = Some(call.id);
+                            rejected.tool_name = Some(call.name);
+                            request.messages.push(rejected);
+                            continue;
+                        }
+                    }
+                }
                 step.status = "approval".into();
                 emit_step(&app, &chat_id, &assistant_id, &step);
                 let approved = wait_approval(&app, &call.id).await;
@@ -719,7 +742,7 @@ async fn run_stream(
                     continue;
                 }
             }
-            let result_text = run_tool(&app, &call.name, &call.arguments, &settings).await;
+            let result_text = run_tool(&app, &call.name, &call.arguments, &settings, &chat_id).await;
             step.status = "done".into();
             step.result = Some(result_text.clone());
             steps.push(step.clone());
@@ -812,6 +835,14 @@ fn persist_partial(app: &AppHandle, message_id: &str, text: &str, thinking: &str
 }
 
 #[tauri::command]
+pub fn set_ui_state(state: State<AppState>, screen: String, focus: String) -> Result<(), String> {
+    let mut ui = state.ui.lock().map_err(|_| "The app is busy.".to_string())?;
+    ui.screen = screen;
+    ui.focus = focus;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn resolve_tool_approval(
     state: State<AppState>,
     call_id: String,
@@ -870,7 +901,7 @@ pub async fn test_web_search(app: AppHandle) -> Result<String, String> {
         .get_settings()
         .map_err(|error| error.to_string())?;
     let answer =
-        crate::tool_runtime::run_tool(&app, "web_search", r#"{"query":"llama.cpp"}"#, &settings)
+        crate::tool_runtime::run_tool(&app, "web_search", r#"{"query":"llama.cpp"}"#, &settings, "")
             .await;
     if answer.starts_with("Add a Brave")
         || answer.starts_with("Web search returned HTTP")
