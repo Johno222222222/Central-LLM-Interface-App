@@ -168,6 +168,9 @@ pub fn hosted_catalog() -> Vec<CatalogModel> {
             loaded: false,
             key_saved: false,
             source_label: String::new(),
+            context_max: *context,
+            context_auto: *context,
+            mmproj_path: None,
         })
         .collect()
 }
@@ -224,12 +227,21 @@ fn walk_gguf(dir: &Path, label: &str, depth: u32, models: &mut Vec<CatalogModel>
             name: name.to_string(),
             provider: ProviderId::Local,
             family: family_from_filename(name),
-            context_limit: meta.and_then(|item| item.context_length).unwrap_or(8_192),
+            context_limit: meta
+                .as_ref()
+                .and_then(|item| item.context_length)
+                .unwrap_or(8_192),
             installed: true,
             path: Some(path.display().to_string()),
             loaded: false,
             key_saved: true,
             source_label: label.to_string(),
+            context_max: meta
+                .as_ref()
+                .and_then(|item| item.context_length)
+                .unwrap_or(8_192),
+            context_auto: 0,
+            mmproj_path: None,
         });
     }
 }
@@ -268,10 +280,15 @@ pub fn write_models_preset(
         let Some(file) = &model.path else {
             continue;
         };
+        let ctx = model.context_limit.max(512);
         text.push_str(&format!(
-            "[{}]\nmodel = {file}\n\n",
+            "[{}]\nmodel = {file}\nc = {ctx}\n",
             preset_section(&model.id)
         ));
+        if let Some(projector) = &model.mmproj_path {
+            text.push_str(&format!("mmproj = {projector}\n"));
+        }
+        text.push('\n');
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| CoreError::Message(error.to_string()))?;
@@ -419,6 +436,9 @@ pub fn catalog_from_ids(provider: ProviderId, ids: &[String]) -> Vec<CatalogMode
             loaded: false,
             key_saved: true,
             source_label: String::new(),
+            context_max: default_context_limit(provider, id),
+            context_auto: default_context_limit(provider, id),
+            mmproj_path: None,
             id: id.clone(),
         })
         .collect()
@@ -477,6 +497,194 @@ pub fn parse_router_models(body: &Value) -> Vec<LoadedModel> {
             })
         })
         .collect()
+}
+
+pub const CONTEXT_STEPS: [u32; 7] = [2_048, 4_096, 8_192, 16_384, 32_768, 65_536, 131_072];
+pub const DEFAULT_VRAM_BYTES: u64 = 12 * 1024 * 1024 * 1024;
+
+pub fn suggest_context(file_bytes: u64, meta: &crate::gguf::GgufMeta, vram_bytes: u64) -> u32 {
+    let reserve = 1536 * 1024 * 1024;
+    let scratch = 256 * 1024 * 1024;
+    let usable = vram_bytes.saturating_sub(reserve);
+    let weights = file_bytes.saturating_mul(105) / 100;
+    let leftover = usable.saturating_sub(weights).saturating_sub(scratch);
+    let kv = kv_bytes_per_token(file_bytes, meta).max(1);
+    let mut tokens = (leftover / kv) as u32;
+    if let Some(train) = meta.context_length {
+        tokens = tokens.min(train);
+    }
+    snap_down(tokens)
+}
+
+pub fn context_ceiling(train: Option<u32>) -> u32 {
+    snap_down(train.unwrap_or(131_072).clamp(2_048, 131_072)).max(2_048)
+}
+
+pub fn clamp_context_step(value: u32, ceiling: u32) -> u32 {
+    let ceiling = ceiling.max(2_048);
+    snap_down(value.min(ceiling)).max(2_048)
+}
+
+fn snap_down(tokens: u32) -> u32 {
+    let mut best = 2_048u32;
+    for step in CONTEXT_STEPS {
+        if step <= tokens {
+            best = step;
+        }
+    }
+    best
+}
+
+fn kv_bytes_per_token(file_bytes: u64, meta: &crate::gguf::GgufMeta) -> u64 {
+    if let (Some(layers), Some(emb), Some(heads)) =
+        (meta.block_count, meta.embedding_length, meta.head_count)
+    {
+        if layers > 0 && emb > 0 && heads > 0 {
+            let kv_heads = meta.head_count_kv.unwrap_or(heads).max(1);
+            let head_dim = (emb / heads).max(1);
+            return 2 * u64::from(layers) * u64::from(kv_heads) * u64::from(head_dim) * 2;
+        }
+    }
+    (file_bytes / 42_000).clamp(8_192, 512 * 1024)
+}
+
+pub fn collect_projectors(primary: &Path, extras: &[String]) -> Vec<String> {
+    let mut found = Vec::new();
+    walk_projectors(primary, 4, &mut found);
+    for extra in extras {
+        let path = Path::new(extra.trim());
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        walk_projectors(path, 4, &mut found);
+    }
+    found
+}
+
+fn walk_projectors(dir: &Path, depth: u32, found: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && depth > 0 {
+            walk_projectors(&path, depth - 1, found);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
+            continue;
+        };
+        let lower = name.to_lowercase();
+        if lower.ends_with(".gguf") && lower.contains("mmproj") {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+pub fn pair_mmproj(model_path: &str, projectors: &[String]) -> Option<String> {
+    let model = Path::new(model_path);
+    let model_dir = model.parent();
+    let model_name = model.file_name().and_then(|name| name.to_str())?;
+    let model_key = stem_key(model_name);
+    if model_key.is_empty() {
+        return None;
+    }
+    let mut best: Option<(i32, String)> = None;
+    for projector in projectors {
+        let path = Path::new(projector);
+        let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
+            continue;
+        };
+        let key = stem_key(name);
+        if key.is_empty() {
+            continue;
+        }
+        let mut score = shared_prefix(&model_key, &key) as i32;
+        if key.contains(&model_key) || model_key.contains(&key) {
+            score += 40;
+        }
+        if path.parent() == model_dir {
+            score += 15;
+        }
+        if score < 12 {
+            continue;
+        }
+        if best.as_ref().map(|(current, _)| score > *current).unwrap_or(true) {
+            best = Some((score, projector.clone()));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+pub fn looks_like_vision(name: &str) -> bool {
+    let padded = format!("-{}-", name.to_ascii_lowercase())
+        .replace(['_', '.'], "-")
+        .replace("--", "-");
+    ["-vl-", "-vision-", "-llava-", "-minicpm-", "-pixtral-", "-moondream-"]
+        .iter()
+        .any(|token| padded.contains(token))
+}
+
+pub fn fit_local_models(
+    models: &mut [CatalogModel],
+    projectors: &[String],
+    vram_bytes: u64,
+    overrides: &std::collections::HashMap<String, u32>,
+) {
+    for model in models
+        .iter_mut()
+        .filter(|model| model.provider == ProviderId::Local)
+    {
+        let Some(path) = model.path.clone() else {
+            continue;
+        };
+        model.mmproj_path = pair_mmproj(&path, projectors);
+        let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let meta = read_gguf_meta(Path::new(&path)).unwrap_or(crate::gguf::GgufMeta {
+            architecture: None,
+            context_length: None,
+            block_count: None,
+            embedding_length: None,
+            head_count: None,
+            head_count_kv: None,
+        });
+        let ceiling = context_ceiling(meta.context_length);
+        let auto = suggest_context(bytes, &meta, vram_bytes).min(ceiling);
+        let chosen = overrides
+            .get(&model.id)
+            .copied()
+            .map(|value| clamp_context_step(value, ceiling))
+            .unwrap_or(auto);
+        model.context_auto = auto;
+        model.context_max = ceiling;
+        model.context_limit = chosen;
+    }
+}
+
+fn stem_key(name: &str) -> String {
+    let mut text = name.to_ascii_lowercase();
+    if let Some(stripped) = text.strip_suffix(".gguf") {
+        text = stripped.to_string();
+    }
+    for token in ["mmproj-", "mmproj_", "-mmproj", "_mmproj", "mmproj"] {
+        text = text.replace(token, "");
+    }
+    for quant in [
+        "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q5_0", "q4_k_m", "q4_k_s", "q4_0", "q3_k_m",
+        "iq4_xs", "f16", "f32", "bf16",
+    ] {
+        text = text.replace(quant, "");
+    }
+    text.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
+}
+
+fn shared_prefix(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(a, b)| a == b)
+        .count()
 }
 
 pub fn loaded_ids(models: &[LoadedModel]) -> Vec<String> {
@@ -576,5 +784,34 @@ mod tests {
             )
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn nine_b_q4_on_12gb_lands_near_32k() {
+        let meta = crate::gguf::GgufMeta {
+            architecture: Some("llama".into()),
+            context_length: Some(131_072),
+            block_count: Some(32),
+            embedding_length: Some(4096),
+            head_count: Some(32),
+            head_count_kv: Some(8),
+        };
+        assert_eq!(
+            suggest_context(5_500_000_000, &meta, 12 * 1024 * 1024 * 1024),
+            32_768
+        );
+    }
+
+    #[test]
+    fn mmproj_matches_the_model_beside_it() {
+        let model = r"D:\models\Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf";
+        let projector = r"D:\models\mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf";
+        let other = r"D:\models\mmproj-unrelated-f16.gguf";
+        assert_eq!(
+            pair_mmproj(model, &[other.into(), projector.into()]).as_deref(),
+            Some(projector)
+        );
+        assert!(looks_like_vision(model));
+        assert!(!looks_like_vision("Qwen2.5-7B-Instruct-Q4_K_M.gguf"));
     }
 }

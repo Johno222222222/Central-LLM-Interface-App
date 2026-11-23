@@ -15,12 +15,14 @@ mod tools;
 mod types;
 
 pub use db::{new_message, now_stamp, Store};
-pub use gguf::read_gguf_meta;
+pub use gguf::{read_gguf_meta, GgufMeta};
 pub use llama::{bundled_origin, llama_command_args, LlamaLaunch, DEFAULT_PORT, VRAM_MARGIN_MIB};
 pub use models::{
-    catalog_from_ids, default_context_limit, detect_lu_model_folder, family_for_model_id,
-    family_from_filename, hosted_catalog, loaded_ids, parse_model_list, parse_router_models,
-    scan_all_model_dirs, scan_gguf_dir, select_model_ids, write_models_preset,
+    catalog_from_ids, clamp_context_step, collect_projectors, context_ceiling, default_context_limit,
+    detect_lu_model_folder, family_for_model_id, family_from_filename, fit_local_models,
+    hosted_catalog, loaded_ids, looks_like_vision, pair_mmproj, parse_model_list, parse_router_models,
+    scan_all_model_dirs, scan_gguf_dir, select_model_ids, suggest_context, write_models_preset,
+    CONTEXT_STEPS, DEFAULT_VRAM_BYTES,
 };
 pub use providers::{
     build_body, build_headers, completion_url, default_origin, friendly_http_error,
@@ -34,7 +36,8 @@ pub use tools::{
     anthropic_tools, brave_search_url, builtin_tools, enabled_builtin, encode_mcp_message,
     gemini_tools, html_to_text, mcp_initialize, mcp_initialized_notification, mcp_tool_name,
     mcp_tools_call, mcp_tools_list, needs_command_approval, openai_tools, parse_mcp_tool_list,
-    path_is_inside, public_http_url, tool_enabled, McpBuffer, ToolSpec, BRAVE_SEARCH_ACCOUNT,
+    path_is_inside, paths_contain, public_http_url, tool_enabled, tool_guidance, McpBuffer,
+    ToolSpec, BRAVE_SEARCH_ACCOUNT,
     MAX_TOOL_ROUNDS,
 };
 pub use types::*;

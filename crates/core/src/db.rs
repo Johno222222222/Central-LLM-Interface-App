@@ -3,8 +3,11 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 use uuid::Uuid;
 
+use std::collections::HashMap;
+
 use crate::{
-    AppSettings, Attachment, Chat, ChatMessage, ChatSettings, ChatSummary, CoreError, ProviderId,
+    AppSettings, Attachment, Chat, ChatMessage, ChatSettings, ChatSummary, CoreError, FeedbackEntry,
+    ProviderId,
 };
 
 pub fn now_stamp() -> String {
@@ -95,6 +98,23 @@ impl Store {
             "messages",
             "tools_json",
             "tools_json TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS model_prefs (
+                model_id TEXT PRIMARY KEY,
+                context_length INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS feedback (
+                id TEXT PRIMARY KEY,
+                chat_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                rating TEXT NOT NULL,
+                note TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            ",
         )?;
         let count: i64 = self
             .conn
@@ -376,6 +396,91 @@ impl Store {
         )?;
         Ok(serde_json::from_str(&json).unwrap_or_default())
     }
+
+    pub fn model_context_overrides(&self) -> Result<HashMap<String, u32>, CoreError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT model_id, context_length FROM model_prefs")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (id, value) = row?;
+            map.insert(id, value);
+        }
+        Ok(map)
+    }
+
+    pub fn set_model_context(&self, model_id: &str, context: u32) -> Result<(), CoreError> {
+        self.conn.execute(
+            "INSERT INTO model_prefs (model_id, context_length) VALUES (?1, ?2)
+             ON CONFLICT(model_id) DO UPDATE SET context_length = excluded.context_length",
+            params![model_id, context],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_messages_from(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        inclusive: bool,
+    ) -> Result<(), CoreError> {
+        let op = if inclusive { ">=" } else { ">" };
+        self.conn.execute(
+            &format!(
+                "DELETE FROM messages WHERE chat_id = ?1 AND rowid {op} (
+                    SELECT rowid FROM messages WHERE id = ?2 AND chat_id = ?1
+                )"
+            ),
+            params![chat_id, message_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_feedback(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        rating: &str,
+        note: &str,
+        model_id: &str,
+    ) -> Result<(), CoreError> {
+        let rating = if rating == "down" { "down" } else { "up" };
+        self.conn.execute(
+            "INSERT INTO feedback (id, chat_id, message_id, rating, note, model_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                chat_id,
+                message_id,
+                rating,
+                note,
+                model_id,
+                now_stamp()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_feedback(&self) -> Result<Vec<FeedbackEntry>, CoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, chat_id, message_id, rating, note, model_id, created_at FROM feedback ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(FeedbackEntry {
+                id: row.get(0)?,
+                chat_id: row.get(1)?,
+                message_id: row.get(2)?,
+                rating: row.get(3)?,
+                note: row.get(4)?,
+                model_id: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CoreError::from)
+    }
 }
 
 pub fn new_message(
@@ -498,6 +603,35 @@ mod tests {
             .unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let text = String::from_utf8_lossy(&bytes);
+        store
+            .set_model_context("Qwen2.5-7B-Q4_K_M.gguf", 32_768)
+            .unwrap();
+        assert_eq!(
+            store
+                .model_context_overrides()
+                .unwrap()
+                .get("Qwen2.5-7B-Q4_K_M.gguf"),
+            Some(&32_768)
+        );
+        let chat = store
+            .create_chat(ProviderId::Local, "Qwen2.5-7B-Q4_K_M.gguf", 32_768)
+            .unwrap();
+        let first = new_message("user", "one", Vec::new(), None, None);
+        let second = new_message("assistant", "two", Vec::new(), None, None);
+        let third = new_message("user", "three", Vec::new(), None, None);
+        store.insert_message(&chat.id, &first).unwrap();
+        store.insert_message(&chat.id, &second).unwrap();
+        store.insert_message(&chat.id, &third).unwrap();
+        store
+            .delete_messages_from(&chat.id, &second.id, true)
+            .unwrap();
+        assert_eq!(store.get_chat(&chat.id).unwrap().messages.len(), 1);
+        store
+            .save_feedback(&chat.id, &first.id, "down", "too short", "local-model")
+            .unwrap();
+        let exported = store.list_feedback().unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].note, "too short");
         assert!(!text.contains(secret));
         assert_eq!(secrets.get_key("openai").unwrap().as_deref(), Some(secret));
         let _ = std::fs::remove_dir_all(&dir);

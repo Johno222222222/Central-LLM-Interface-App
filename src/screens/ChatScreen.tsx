@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { api, isTauri, subscribe } from "../api";
-import { MessageView } from "../components/MessageView";
+import { contextSteps, MessageView } from "../components/MessageView";
 import { ToolsMenu } from "../components/ToolsMenu";
 import { ModelPicker } from "../components/ModelPicker";
 import { SamplingPopover } from "../components/SamplingPopover";
@@ -17,11 +17,13 @@ export function ChatScreen() {
   const [error, setError] = useState<string | null>(null);
   const [sampling, setSampling] = useState(false);
   const [pendingApproval, setPendingApproval] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const buffers = useRef(new Map<string, { text: string; thinking: string }>());
   const fileRef = useRef<HTMLInputElement>(null);
   const chatId = chat?.id;
 
   useEffect(() => {
+    let alive = true;
     let stop = () => {};
     void subscribe({
       onDelta: (event) => {
@@ -77,9 +79,13 @@ export function ChatScreen() {
         if (event.error) setError(event.error);
       },
     }).then((unlisten) => {
-      stop = unlisten;
+      if (!alive) unlisten();
+      else stop = unlisten;
     });
-    return () => stop();
+    return () => {
+      alive = false;
+      stop();
+    };
   }, []);
 
   useEffect(() => {
@@ -136,6 +142,24 @@ export function ChatScreen() {
     if (!chat || streamingId) return;
     setError(null);
     try {
+      if (editingId) {
+        const started = await api.editMessage(chat.id, editingId, draft);
+        const editedId = editingId;
+        setEditingId(null);
+        setDraft("");
+        setStreamingId(started.assistant.id);
+        setChat((current) => {
+          if (!current) return current;
+          const index = current.messages.findIndex((message) => message.id === editedId);
+          const kept = index < 0 ? current.messages : current.messages.slice(0, index);
+          const edited = index < 0 ? null : { ...current.messages[index], content: draft };
+          return {
+            ...current,
+            messages: edited ? [...kept, edited, started.assistant] : [...current.messages, started.assistant],
+          };
+        });
+        return;
+      }
       const started = await api.sendMessage(
         chat.id,
         draft,
@@ -162,8 +186,50 @@ export function ChatScreen() {
     }
   }
 
+  async function retry(message: ChatMessage, modelId?: string) {
+    if (!chat || streamingId) return;
+    setError(null);
+    const chosen = models.find((model) => model.id === modelId);
+    try {
+      const started = await api.regenerateMessage(chat.id, message.id, modelId, chosen?.provider);
+      setStreamingId(started.assistant.id);
+      setChat((current) => {
+        if (!current) return current;
+        const index = current.messages.findIndex((item) => item.id === message.id);
+        const kept = index < 0 ? current.messages : current.messages.slice(0, index);
+        return {
+          ...current,
+          modelId: modelId || current.modelId,
+          provider: chosen?.provider ?? current.provider,
+          contextLimit: chosen?.contextLimit ?? current.contextLimit,
+          messages: [...kept, started.assistant],
+        };
+      });
+    } catch (reason) {
+      setStreamingId(null);
+      setError(messageOf(reason));
+    }
+  }
+
+  async function branch(message: ChatMessage) {
+    if (!chat) return;
+    const created = await api.branchChat(chat.id, message.id);
+    setChats((list) => [created, ...list.filter((item) => item.id !== created.id)]);
+    setChat(created);
+    setDraft("");
+    setEditingId(null);
+  }
+
+  async function changeContext(value: number) {
+    if (!chat) return;
+    const updated = await api.setModelContext(chat.modelId, value);
+    setModels((list) => list.map((model) => (model.id === updated.id ? updated : model)));
+    setChat((current) => (current ? { ...current, contextLimit: updated.contextLimit } : current));
+  }
+
+  const selected = models.find((model) => model.id === chat?.modelId && model.provider === chat?.provider);
   const used = (chat?.contextUsed ?? 0) + estimateTokens(draft);
-  const limit = chat?.contextLimit || 8192;
+  const limit = (selected?.provider === "local" ? selected.contextLimit : chat?.contextLimit) || chat?.contextLimit || 8192;
 
   return (
     <div className="chat-shell">
@@ -189,7 +255,23 @@ export function ChatScreen() {
         <div className="messages">
           {chat && chat.messages.length > 0 ? (
             chat.messages.map((message: ChatMessage) => (
-              <MessageView key={message.id} message={message} streaming={message.id === streamingId} />
+              <MessageView
+                key={message.id}
+                message={message}
+                streaming={message.id === streamingId}
+                models={models}
+                busy={Boolean(streamingId)}
+                onEdit={(item) => {
+                  setEditingId(item.id);
+                  setDraft(item.content);
+                }}
+                onRetry={(item, modelId) => void retry(item, modelId)}
+                onBranch={(item) => void branch(item)}
+                onFeedback={(item, rating, note) => {
+                  if (!chat) return;
+                  void api.saveFeedback(chat.id, item.id, rating, note).catch((reason: unknown) => setError(messageOf(reason)));
+                }}
+              />
             ))
           ) : (
             <div className="empty-thread">
@@ -213,9 +295,27 @@ export function ChatScreen() {
               onSelect={(model) => void chooseModel(model)}
               onModels={setModels}
             />
-            <span className="meter" title="Approximate context used">
+            <span className="meter" title="Context window for this model">
               {formatContext(used, limit)}
             </span>
+            {selected?.provider === "local" ? (
+              <label className="ctx-slider">
+                Context
+                <input
+                  type="range"
+                  min={0}
+                  max={contextSteps(selected.contextMax ?? limit).length - 1}
+                  step={1}
+                  value={Math.max(0, contextSteps(selected.contextMax ?? limit).indexOf(limit))}
+                  onChange={(event) => {
+                    const steps = contextSteps(selected.contextMax ?? limit);
+                    const next = steps[Number(event.target.value)] ?? limit;
+                    void changeContext(next);
+                  }}
+                  disabled={Boolean(streamingId)}
+                />
+              </label>
+            ) : null}
             <span className="spacer" />
             <button
               type="button"

@@ -409,7 +409,20 @@ pub fn redact(secret: &str, text: &str) -> String {
     text.replace(secret, "•••")
 }
 
-pub fn friendly_http_error(status: u16, body: &str) -> String {
+pub fn friendly_http_error(provider: ProviderId, status: u16, body: &str) -> String {
+    let lower = body.to_lowercase();
+    if provider == ProviderId::Local
+        && (lower.contains("mmproj") || lower.contains("image input is not supported"))
+    {
+        return "This model can't see images. Put a matching mmproj GGUF next to it, or pick a vision model.".into();
+    }
+    if status == 402
+        || lower.contains("insufficient balance")
+        || lower.contains("insufficient_quota")
+        || (lower.contains("credit") && lower.contains("balance"))
+    {
+        return credit_message(provider);
+    }
     let detail = extract_error_message(body);
     let detail = if detail.is_empty() {
         String::new()
@@ -425,6 +438,17 @@ pub fn friendly_http_error(status: u16, body: &str) -> String {
         }
         500..=599 => format!("The provider had an internal error ({status}).{detail}"),
         _ => format!("The provider returned HTTP {status}.{detail}"),
+    }
+}
+
+fn credit_message(provider: ProviderId) -> String {
+    match provider {
+        ProviderId::Deepseek => "Your DeepSeek account is out of credit. Top up on DeepSeek's site, or switch to OpenRouter.".into(),
+        ProviderId::Openrouter => "Your OpenRouter account is out of credit. Add credits there, or switch to another model.".into(),
+        ProviderId::Openai => "Your OpenAI account is out of credit. Check billing on OpenAI, or switch models.".into(),
+        ProviderId::Anthropic => "Your Anthropic account is out of credit. Check billing, or switch models.".into(),
+        ProviderId::Gemini => "Your Gemini account is out of quota. Check the Google AI quota, or switch models.".into(),
+        ProviderId::Local => "The local server refused the request.".into(),
     }
 }
 
@@ -510,6 +534,7 @@ where
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         return Err(CoreError::Message(friendly_http_error(
+            request.provider,
             status.as_u16(),
             &redact(api_key, &text),
         )));
@@ -611,6 +636,7 @@ pub async fn test_provider(
     }
     let text = response.text().await.unwrap_or_default();
     Err(CoreError::Message(friendly_http_error(
+        provider,
         status.as_u16(),
         &redact(api_key, &text),
     )))
@@ -715,12 +741,26 @@ mod tests {
     #[test]
     fn bad_key_error_is_readable_and_redacts_the_secret() {
         let message = friendly_http_error(
+            ProviderId::Openai,
             401,
             r#"{"error":{"message":"invalid api key sk-secret-value"}}"#,
         );
         let message = redact("sk-secret-value", &message);
         assert!(message.contains("That key was rejected."));
         assert!(!message.contains("sk-secret-value"));
+        let credit = friendly_http_error(
+            ProviderId::Deepseek,
+            402,
+            r#"{"error":{"message":"Insufficient Balance"}}"#,
+        );
+        assert!(credit.contains("DeepSeek account is out of credit"));
+        assert!(credit.contains("OpenRouter"));
+        let vision = friendly_http_error(
+            ProviderId::Local,
+            500,
+            "image input is not supported - hint: you may need to provide the mmproj",
+        );
+        assert!(vision.contains("can't see images"));
     }
 
     #[tokio::test]

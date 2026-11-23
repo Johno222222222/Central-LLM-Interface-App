@@ -33,6 +33,16 @@ If you already run llama-server yourself, paste its URL under **Local runtime** 
 - Tools, from the composer: web search (Brave, your own key), web fetch, files in folders you approve, shell with a yes on each command, screenshot, and MCP servers from Settings. Shell and Files start off.
 - Extra GGUF folders in Settings, scanned in place. Import from Locally Uncensored fills in that app's model folder when it can find it.
 
+## What v0.1.2 adds
+
+- Local context follows the card and the model. A 9B Q4 on 12 GB is about 32K. Each model has a slider in Settings and next to the token pill. The pill shows that window, and changing it restarts the bundled server.
+- Screenshot, shell, and MCP do not flash a console window. A whole drive approved for Files covers every folder on it.
+- A matching mmproj GGUF beside a vision model is picked up automatically. A picture sent to a text-only model gets a clear message.
+- An empty account (HTTP 402) says which provider is out of credit.
+- Hover a message for Copy. User messages can be edited and resent. Assistant messages can be retried, branched, or marked up or down. Export feedback is in Settings.
+
+The next milestone is still app-awareness tools, then v0.2 Create with ComfyUI.
+
 ## Run from source
 
 On Windows, install Node.js 22, the Rust stable toolchain, and the Visual Studio C++ build tools. Then:

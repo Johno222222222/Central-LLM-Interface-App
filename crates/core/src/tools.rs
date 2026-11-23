@@ -26,8 +26,7 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "web_search".into(),
             title: "Web search".into(),
-            description: "Search the public web and return a few result titles, URLs, and snippets."
-                .into(),
+            description: "Search the web. Returns a few titles and URLs.".into(),
             parameters: object_schema(
                 json!({
                     "query": {"type": "string", "description": "What to search for"}
@@ -39,8 +38,7 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "web_fetch".into(),
             title: "Web fetch".into(),
-            description: "Fetch a public http or https page and return its text. Private addresses are refused."
-                .into(),
+            description: "Fetch one public http(s) page as text.".into(),
             parameters: object_schema(
                 json!({
                     "url": {"type": "string", "description": "Absolute http or https URL"}
@@ -52,8 +50,7 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "files".into(),
             title: "Files".into(),
-            description: "List or read a file inside a folder the user approved in Settings. This cannot write or delete."
-                .into(),
+            description: "List or read a file inside an approved folder. Cannot write.".into(),
             parameters: object_schema(
                 json!({
                     "action": {"type": "string", "enum": ["list", "read"]},
@@ -66,8 +63,7 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "shell".into(),
             title: "Shell".into(),
-            description: "Run one shell command. The user must approve the exact command before it runs."
-                .into(),
+            description: "Run one command after the user approves it.".into(),
             parameters: object_schema(
                 json!({
                     "command": {"type": "string", "description": "The command line to run"}
@@ -79,7 +75,7 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "screenshot".into(),
             title: "Screenshot".into(),
-            description: "Capture the primary screen and return the saved image path.".into(),
+            description: "Capture the primary screen.".into(),
             parameters: object_schema(json!({}), &[]),
             risky: false,
         },
@@ -286,14 +282,57 @@ fn parse_ipv4(host: &str) -> Option<[u8; 4]> {
     Some(parts)
 }
 
+/// True when `candidate` is `root` or a path inside it.
+/// Drive roots such as `C:\` contain everything on that drive. Comparison ignores
+/// case, slash direction, a `\\?\` prefix, and a trailing separator. The paths do
+/// not have to exist on disk.
 pub fn path_is_inside(root: &std::path::Path, candidate: &std::path::Path) -> bool {
-    let Ok(root) = std::fs::canonicalize(root) else {
+    paths_contain(&root.to_string_lossy(), &candidate.to_string_lossy())
+}
+
+pub fn paths_contain(root: &str, candidate: &str) -> bool {
+    let root = normalize_path_key(root);
+    let candidate = normalize_path_key(candidate);
+    if root.is_empty() || candidate.is_empty() {
         return false;
+    }
+    if is_drive_root(&root) {
+        let drive = &root[..2];
+        return candidate.len() >= 2 && candidate[..2].eq_ignore_ascii_case(drive);
+    }
+    candidate == root || candidate.starts_with(&(root + "\\"))
+}
+
+fn normalize_path_key(raw: &str) -> String {
+    let mut text = raw.trim().replace('/', "\\");
+    if let Some(rest) = text.strip_prefix("\\\\?\\") {
+        text = rest.to_string();
+    }
+    while text.len() > 3 && text.ends_with('\\') {
+        text.pop();
+    }
+    if text.len() == 2 && text.as_bytes().get(1) == Some(&b':') {
+        text.push('\\');
+    }
+    text.to_ascii_lowercase()
+}
+
+fn is_drive_root(normalized: &str) -> bool {
+    normalized.len() == 3
+        && normalized.as_bytes()[1] == b':'
+        && normalized.as_bytes()[2] == b'\\'
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+}
+
+pub fn tool_guidance(approved_folders: &[String]) -> String {
+    let folders = if approved_folders.is_empty() {
+        "none approved yet".to_string()
+    } else {
+        approved_folders.join(", ")
     };
-    let Ok(candidate) = std::fs::canonicalize(candidate) else {
-        return false;
-    };
-    candidate.starts_with(root)
+    format!(
+        "Tools are available. The files tool can only read these approved folders: {folders}. Do not invent paths outside them. Keep listings short."
+    )
 }
 
 pub fn mcp_tool_name(server: &str, tool: &str) -> String {
@@ -511,6 +550,29 @@ mod tests {
         let text = html_to_text("<p>Hello <b>world</b></p><script>alert(1)</script>");
         assert!(text.contains("Hello world"));
         assert!(!text.contains("alert"));
+    }
+
+    #[test]
+    fn drive_root_contains_paths_under_it() {
+        assert!(paths_contain(r"C:\", r"C:\Users\Public\ComfyUI"));
+        assert!(paths_contain("c:", r"C:\Users\Public\ComfyUI"));
+        assert!(paths_contain(r"C:\", r"c:/users/public/comfyui/"));
+        assert!(paths_contain(r"D:\", r"D:\"));
+        assert!(!paths_contain(r"D:\", r"C:\Users\Public\ComfyUI"));
+        assert!(!paths_contain(r"C:\Users", r"C:\UsersExtra\notes"));
+        assert!(paths_contain(r"C:\Users\", r"C:\Users\Public"));
+        assert!(paths_contain(
+            r"\\?\C:\Users\Public",
+            r"C:/Users/Public/ComfyUI"
+        ));
+    }
+
+    #[test]
+    fn tool_guidance_names_approved_folders() {
+        let text = tool_guidance(&[r"C:\".into(), r"D:\".into()]);
+        assert!(text.contains(r"C:\"));
+        assert!(text.contains(r"D:\"));
+        assert!(tool_guidance(&[]).contains("none approved"));
     }
 
     #[test]

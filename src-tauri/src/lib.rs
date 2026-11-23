@@ -59,8 +59,14 @@ pub fn run() {
                     .ok()
                     .and_then(|store| store.get_settings().ok());
                 if let Some(settings) = settings {
+                    let overrides = state
+                        .store
+                        .lock()
+                        .ok()
+                        .and_then(|store| store.model_context_overrides().ok())
+                        .unwrap_or_default();
                     if let Ok(mut process) = state.llama.lock() {
-                        let _ = sync_runtime(&handle, &mut process, &settings);
+                        let _ = sync_runtime(&handle, &mut process, &settings, &overrides);
                     }
                     let snapshot = state
                         .llama
@@ -100,6 +106,12 @@ pub fn run() {
             commands::update_chat_settings,
             commands::stage_attachment,
             commands::send_message,
+            commands::edit_message,
+            commands::regenerate_message,
+            commands::branch_chat,
+            commands::save_feedback,
+            commands::export_feedback,
+            commands::set_model_context,
             commands::stop_generation,
             commands::resolve_tool_approval,
             commands::detect_lu_folder,

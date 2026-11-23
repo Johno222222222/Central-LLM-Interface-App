@@ -179,11 +179,16 @@ fn files(settings: &AppSettings, action: &str, path: &str) -> String {
                     .filter_map(|entry| entry.file_name().into_string().ok())
                     .collect::<Vec<_>>();
                 names.sort();
-                names.truncate(200);
+                let truncated = names.len() > 60;
+                names.truncate(60);
                 if names.is_empty() {
                     "That folder is empty.".into()
                 } else {
-                    names.join("\n")
+                    let mut text = names.join("\n");
+                    if truncated {
+                        text.push_str("\n…listing truncated");
+                    }
+                    truncate(&text, 4_000)
                 }
             }
             Err(error) => format!("Could not list that folder. {error}"),
@@ -191,7 +196,7 @@ fn files(settings: &AppSettings, action: &str, path: &str) -> String {
         "read" => match std::fs::read(candidate) {
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
-                truncate(&text, 48_000)
+                truncate(&text, 8_000)
             }
             Err(error) => format!("Could not read that file. {error}"),
         },
@@ -212,6 +217,7 @@ fn shell(command: &str) -> String {
         cmd.args(["-c", command]);
         cmd
     };
+    hide_console(&mut process);
     let mut child = match process
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -261,29 +267,160 @@ fn screenshot(data_dir: &Path) -> String {
     {
         let dest = data_dir.join("attachments");
         let _ = std::fs::create_dir_all(&dest);
-        let file = dest.join(format!("screenshot-{}.png", std::process::id()));
-        let script = format!(
-            "$path = '{}'; Add-Type -AssemblyName System.Windows.Forms,System.Drawing; $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height; $graphics = [System.Drawing.Graphics]::FromImage($bitmap); $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size); $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); $graphics.Dispose(); $bitmap.Dispose()",
-            file.display().to_string().replace('\'', "''")
-        );
-        let result = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output();
-        match result {
-            Ok(output) if output.status.success() && file.exists() => {
-                format!("Saved a screenshot at {}", file.display())
-            }
-            Ok(output) => format!(
-                "Screenshot failed. {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-            Err(error) => format!("Could not start the screenshot. {error}"),
+        let file = dest.join(format!("screenshot-{}.bmp", std::process::id()));
+        match capture_screen(&file) {
+            Ok(()) => format!("Saved a screenshot at {}", file.display()),
+            Err(error) => format!("Screenshot failed. {error}"),
         }
     }
     #[cfg(not(windows))]
     {
         let _ = data_dir;
         "Screenshot runs on Windows.".into()
+    }
+}
+
+#[cfg(windows)]
+fn capture_screen(path: &Path) -> Result<(), String> {
+    use std::ffi::c_void;
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateCompatibleDC(hdc: *mut c_void) -> *mut c_void;
+        fn DeleteDC(hdc: *mut c_void) -> i32;
+        fn CreateCompatibleBitmap(hdc: *mut c_void, width: i32, height: i32) -> *mut c_void;
+        fn SelectObject(hdc: *mut c_void, object: *mut c_void) -> *mut c_void;
+        fn DeleteObject(object: *mut c_void) -> i32;
+        fn BitBlt(
+            dest: *mut c_void,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            src: *mut c_void,
+            src_x: i32,
+            src_y: i32,
+            rop: u32,
+        ) -> i32;
+        fn GetDIBits(
+            hdc: *mut c_void,
+            bitmap: *mut c_void,
+            start: u32,
+            lines: u32,
+            bits: *mut c_void,
+            info: *mut BitmapInfo,
+            usage: u32,
+        ) -> i32;
+    }
+    #[repr(C)]
+    struct BitmapInfoHeader {
+        size: u32,
+        width: i32,
+        height: i32,
+        planes: u16,
+        bit_count: u16,
+        compression: u32,
+        size_image: u32,
+        x_pels: i32,
+        y_pels: i32,
+        clr_used: u32,
+        clr_important: u32,
+    }
+    #[repr(C)]
+    struct BitmapInfo {
+        header: BitmapInfoHeader,
+    }
+    unsafe {
+        let width = GetSystemMetrics(0);
+        let height = GetSystemMetrics(1);
+        if width <= 0 || height <= 0 {
+            return Err("No screen was found.".into());
+        }
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return Err("Could not read the screen.".into());
+        }
+        let memory = CreateCompatibleDC(screen);
+        let bitmap = CreateCompatibleBitmap(screen, width, height);
+        if memory.is_null() || bitmap.is_null() {
+            ReleaseDC(std::ptr::null_mut(), screen);
+            return Err("Could not prepare the capture.".into());
+        }
+        let previous = SelectObject(memory, bitmap);
+        let copied = BitBlt(memory, 0, 0, width, height, screen, 0, 0, 0x00CC_0020);
+        let stride = (width as usize) * 4;
+        let mut pixels = vec![0u8; stride * height as usize];
+        let mut info = BitmapInfo {
+            header: BitmapInfoHeader {
+                size: 40,
+                width,
+                height,
+                planes: 1,
+                bit_count: 32,
+                compression: 0,
+                size_image: pixels.len() as u32,
+                x_pels: 0,
+                y_pels: 0,
+                clr_used: 0,
+                clr_important: 0,
+            },
+        };
+        let rows = GetDIBits(
+            memory,
+            bitmap,
+            0,
+            height as u32,
+            pixels.as_mut_ptr() as *mut c_void,
+            &mut info,
+            0,
+        );
+        SelectObject(memory, previous);
+        DeleteObject(bitmap);
+        DeleteDC(memory);
+        ReleaseDC(std::ptr::null_mut(), screen);
+        if copied == 0 || rows == 0 {
+            return Err("Could not copy the screen.".into());
+        }
+        write_bmp(path, width, height, &pixels)
+    }
+}
+
+#[cfg(windows)]
+fn write_bmp(path: &Path, width: i32, height: i32, pixels: &[u8]) -> Result<(), String> {
+    let image_size = pixels.len() as u32;
+    let offset = 14 + 40;
+    let file_size = offset + image_size;
+    let mut bytes = Vec::with_capacity(file_size as usize);
+    bytes.extend_from_slice(b"BM");
+    bytes.extend_from_slice(&file_size.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&offset.to_le_bytes());
+    bytes.extend_from_slice(&40u32.to_le_bytes());
+    bytes.extend_from_slice(&width.to_le_bytes());
+    bytes.extend_from_slice(&height.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&32u16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&image_size.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    bytes.extend_from_slice(pixels);
+    std::fs::write(path, bytes).map_err(|error| error.to_string())
+}
+
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
     }
 }
 
@@ -352,11 +489,14 @@ fn mcp_call(server: &McpServerConfig, name: &str, args: &Value) -> Result<String
 }
 
 fn mcp_exchange(server: &McpServerConfig, outbound: &[Value]) -> Result<Vec<Value>, String> {
-    let mut child = Command::new(&server.command)
+    let mut command = Command::new(&server.command);
+    command
         .args(&server.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Could not start {}. {error}", server.name))?;
     let mut stdin = child

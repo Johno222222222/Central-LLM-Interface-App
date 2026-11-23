@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use central_llm_core::{
-    bundled_origin, llama_command_args, scan_all_model_dirs, write_models_preset, AppSettings,
-    LlamaLaunch, DEFAULT_PORT, VRAM_MARGIN_MIB,
+    bundled_origin, collect_projectors, fit_local_models, llama_command_args, scan_all_model_dirs,
+    write_models_preset, AppSettings, CatalogModel, LlamaLaunch, DEFAULT_PORT, DEFAULT_VRAM_BYTES,
+    VRAM_MARGIN_MIB,
 };
 use tauri::{AppHandle, Manager};
 
@@ -46,14 +48,65 @@ pub fn force_restart(process: &mut LlamaProcess) {
     process.running = false;
 }
 
+pub fn prepared_models(
+    settings: &AppSettings,
+    overrides: &HashMap<String, u32>,
+) -> Vec<CatalogModel> {
+    let mut models = scan_all_model_dirs(
+        Path::new(&settings.models_dir),
+        &settings.extra_model_dirs,
+    );
+    let projectors = collect_projectors(Path::new(&settings.models_dir), &settings.extra_model_dirs);
+    fit_local_models(&mut models, &projectors, detect_vram_bytes(), overrides);
+    models
+}
+
+pub fn detect_vram_bytes() -> u64 {
+    let mut command = Command::new("nvidia-smi");
+    command.args([
+        "--query-gpu=memory.total",
+        "--format=csv,noheader,nounits",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let Ok(output) = command.output() else {
+        return DEFAULT_VRAM_BYTES;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .find(|part| !part.is_empty())
+        .and_then(|part| part.parse::<u64>().ok())
+        .filter(|mib| *mib >= 1024)
+        .map(|mib| mib * 1024 * 1024)
+        .unwrap_or(DEFAULT_VRAM_BYTES)
+}
+
 pub fn sync_runtime(
     app: &AppHandle,
     process: &mut LlamaProcess,
     settings: &AppSettings,
+    overrides: &HashMap<String, u32>,
 ) -> Result<(), String> {
     let custom = normalize_origin(&settings.llama_server_url);
+    let models = prepared_models(settings, overrides);
+    let fitted = models
+        .iter()
+        .filter(|model| model.provider == central_llm_core::ProviderId::Local)
+        .map(|model| {
+            format!(
+                "{}={} {}",
+                model.id,
+                model.context_limit,
+                model.mmproj_path.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
     let fingerprint = format!(
-        "{custom}|{}|{}|{}|{}",
+        "{custom}|{}|{}|{}|{}|{fitted}",
         settings.models_dir,
         settings.extra_model_dirs.join(";"),
         settings.context_length,
@@ -100,8 +153,6 @@ pub fn sync_runtime(
         .ok()
         .map(|dir| dir.join("models-preset.ini"));
     if let Some(preset_path) = &preset {
-        let models =
-            scan_all_model_dirs(Path::new(&settings.models_dir), &settings.extra_model_dirs);
         write_models_preset(
             preset_path,
             &models,

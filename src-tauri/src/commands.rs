@@ -4,13 +4,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use std::collections::HashMap;
+
 use central_llm_core::{
-    catalog_from_ids, default_context_limit, default_origin, estimate_thread_tokens,
-    friendly_http_error, hosted_catalog, loaded_ids, new_message, parse_model_ids,
-    parse_router_models, redact, scan_all_model_dirs, stream_completion, test_provider, test_url,
-    title_from_message, AppSettings, Attachment, CatalogModel, Chat, ChatMessage, ChatSettings,
-    ChatSummary, CompletionRequest, ImagePart, OutgoingMessage, ProviderId, ProviderStatus,
-    StreamPiece, ToolStep, BRAVE_SEARCH_ACCOUNT, MAX_TOOL_ROUNDS,
+    catalog_from_ids, clamp_context_step, default_context_limit, default_origin,
+    estimate_thread_tokens, friendly_http_error, hosted_catalog, loaded_ids, looks_like_vision,
+    new_message, parse_model_ids, parse_router_models, redact, stream_completion, test_provider,
+    test_url, title_from_message, tool_guidance, AppSettings, Attachment, CatalogModel, Chat,
+    ChatMessage, ChatSettings, ChatSummary, CompletionRequest, ImagePart, OutgoingMessage,
+    ProviderId, ProviderStatus, StreamPiece, ToolStep, BRAVE_SEARCH_ACCOUNT, MAX_TOOL_ROUNDS,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -169,7 +171,10 @@ pub async fn restart_runtime(
     {
         let mut process = guard(&state.llama)?;
         runtime::force_restart(&mut process);
-        sync_runtime(&app, &mut process, &settings)?;
+        let overrides = guard(&state.store)?
+            .model_context_overrides()
+            .unwrap_or_default();
+        sync_runtime(&app, &mut process, &settings, &overrides)?;
     }
     let snapshot = {
         let process = guard(&state.llama)?;
@@ -203,7 +208,10 @@ pub async fn set_models_dir(
     {
         let mut process = guard(&state.llama)?;
         runtime::force_restart(&mut process);
-        sync_runtime(&app, &mut process, &settings)?;
+        let overrides = guard(&state.store)?
+            .model_context_overrides()
+            .unwrap_or_default();
+        sync_runtime(&app, &mut process, &settings, &overrides)?;
     }
     Ok(settings)
 }
@@ -213,8 +221,10 @@ pub async fn list_models(state: State<'_, AppState>) -> Result<Vec<CatalogModel>
     let settings = guard(&state.store)?
         .get_settings()
         .map_err(|error| error.to_string())?;
-    let mut local =
-        scan_all_model_dirs(Path::new(&settings.models_dir), &settings.extra_model_dirs);
+    let overrides = guard(&state.store)?
+        .model_context_overrides()
+        .unwrap_or_default();
+    let mut local = runtime::prepared_models(&settings, &overrides);
     let origin = local_origin(&state).unwrap_or_default();
     if !origin.is_empty() {
         if let Ok(response) = state.client.get(format!("{origin}/models")).send().await {
@@ -269,7 +279,7 @@ pub async fn refresh_hosted_models(
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(friendly_http_error(status.as_u16(), &redact(&key, &body)));
+        return Err(friendly_http_error(provider, status.as_u16(), &redact(&key, &body)));
     }
     let ids = parse_model_ids(provider, &body).map_err(|error| error.to_string())?;
     let mut models = catalog_from_ids(provider, &ids);
@@ -352,7 +362,8 @@ pub fn create_chat(
 ) -> Result<Chat, String> {
     let store = guard(&state.store)?;
     let settings = store.get_settings().map_err(|error| error.to_string())?;
-    let limit = context_limit(provider, &model_id, settings.context_length);
+    let overrides = store.model_context_overrides().unwrap_or_default();
+    let limit = context_limit(provider, &model_id, &settings, &overrides);
     store
         .create_chat(provider, &model_id, limit)
         .map_err(|error| error.to_string())
@@ -374,7 +385,8 @@ pub fn update_chat_model(
 ) -> Result<Chat, String> {
     let store = guard(&state.store)?;
     let settings = store.get_settings().map_err(|error| error.to_string())?;
-    let limit = context_limit(provider, &model_id, settings.context_length);
+    let overrides = store.model_context_overrides().unwrap_or_default();
+    let limit = context_limit(provider, &model_id, &settings, &overrides);
     store
         .update_chat_model(&id, provider, &model_id, limit)
         .map_err(|error| error.to_string())?;
@@ -475,6 +487,7 @@ pub async fn send_message(
         item.images = images;
         outgoing.push(item);
     }
+    let has_new_images = !user_images.is_empty();
     let mut user_turn = OutgoingMessage::text("user", content.clone());
     user_turn.images = user_images;
     outgoing.push(user_turn);
@@ -492,7 +505,22 @@ pub async fn send_message(
     } else {
         chat.title.clone()
     };
-    let limit = context_limit(chat.provider, &chat.model_id, settings.context_length);
+    let overrides = guard(&state.store)?
+        .model_context_overrides()
+        .unwrap_or_default();
+    let has_images = has_new_images || chat_has_images(&chat);
+    vision_gate(
+        &settings,
+        &overrides,
+        chat.provider,
+        &chat.model_id,
+        has_images,
+    )?;
+    if chat.provider == ProviderId::Local && has_images {
+        let mut process = guard(&state.llama)?;
+        sync_runtime(&app, &mut process, &settings, &overrides)?;
+    }
+    let limit = context_limit(chat.provider, &chat.model_id, &settings, &overrides);
     let prior_parts: Vec<String> = chat
         .messages
         .iter()
@@ -586,6 +614,12 @@ async fn run_stream(
         return;
     };
     request.tools = collect_tools(&request.settings.tools, &settings);
+    if !request.tools.is_empty() {
+        request.messages.insert(
+            0,
+            OutgoingMessage::text("system", tool_guidance(&settings.approved_folders)),
+        );
+    }
     let mut steps: Vec<ToolStep> = Vec::new();
     let mut final_text = String::new();
     let mut final_thinking = String::new();
@@ -884,11 +918,320 @@ fn local_origin(state: &AppState) -> Result<String, String> {
     }
 }
 
-fn context_limit(provider: ProviderId, model_id: &str, local_context: u32) -> u32 {
+#[tauri::command]
+pub async fn edit_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: String,
+    message_id: String,
+    content: String,
+) -> Result<SendStarted, String> {
+    let content = content.trim().to_string();
+    if content.is_empty() {
+        return Err("Write a message first.".into());
+    }
+    {
+        let store = guard(&state.store)?;
+        store
+            .update_message(&message_id, &content, None)
+            .map_err(|error| error.to_string())?;
+        store
+            .delete_messages_from(&chat_id, &message_id, false)
+            .map_err(|error| error.to_string())?;
+    }
+    spawn_reply(app, &state, &chat_id)
+}
+
+#[tauri::command]
+pub async fn regenerate_message(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    chat_id: String,
+    message_id: String,
+    model_id: Option<String>,
+    provider: Option<String>,
+) -> Result<SendStarted, String> {
+    if let Some(model_id) = model_id.filter(|id| !id.trim().is_empty()) {
+        let chat = guard(&state.store)?
+            .get_chat(&chat_id)
+            .map_err(|error| error.to_string())?;
+        let provider = provider
+            .as_deref()
+            .and_then(ProviderId::from_slug)
+            .unwrap_or(chat.provider);
+        let settings = guard(&state.store)?
+            .get_settings()
+            .map_err(|error| error.to_string())?;
+        let overrides = guard(&state.store)?
+            .model_context_overrides()
+            .unwrap_or_default();
+        let limit = context_limit(provider, &model_id, &settings, &overrides);
+        guard(&state.store)?
+            .update_chat_model(&chat_id, provider, &model_id, limit)
+            .map_err(|error| error.to_string())?;
+    }
+    guard(&state.store)?
+        .delete_messages_from(&chat_id, &message_id, true)
+        .map_err(|error| error.to_string())?;
+    spawn_reply(app, &state, &chat_id)
+}
+
+#[tauri::command]
+pub fn branch_chat(
+    state: State<AppState>,
+    chat_id: String,
+    message_id: String,
+) -> Result<Chat, String> {
+    let store = guard(&state.store)?;
+    let source = store.get_chat(&chat_id).map_err(|error| error.to_string())?;
+    let end = source
+        .messages
+        .iter()
+        .position(|message| message.id == message_id)
+        .ok_or("That message is no longer in the chat.")?;
+    let branched = store
+        .create_chat(source.provider, &source.model_id, source.context_limit)
+        .map_err(|error| error.to_string())?;
+    store
+        .update_chat_settings(&branched.id, &source.settings)
+        .map_err(|error| error.to_string())?;
+    for message in source.messages.iter().take(end + 1) {
+        let mut copy = message.clone();
+        copy.id = new_message(
+            &message.role,
+            &message.content,
+            message.attachments.clone(),
+            message.provider,
+            message.model_id.clone(),
+        )
+        .id;
+        store
+            .insert_message(&branched.id, &copy)
+            .map_err(|error| error.to_string())?;
+    }
+    let title = format!("{} (branch)", source.title);
+    store
+        .touch_chat(&branched.id, Some(&title), source.context_used, source.context_limit)
+        .map_err(|error| error.to_string())?;
+    store
+        .get_chat(&branched.id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_feedback(
+    state: State<AppState>,
+    chat_id: String,
+    message_id: String,
+    rating: String,
+    note: String,
+) -> Result<(), String> {
+    let store = guard(&state.store)?;
+    let chat = store.get_chat(&chat_id).map_err(|error| error.to_string())?;
+    store
+        .save_feedback(&chat_id, &message_id, &rating, note.trim(), &chat.model_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn export_feedback(state: State<AppState>) -> Result<String, String> {
+    let rows = guard(&state.store)?
+        .list_feedback()
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string_pretty(&rows).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn set_model_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+    context: u32,
+) -> Result<CatalogModel, String> {
+    let settings = guard(&state.store)?
+        .get_settings()
+        .map_err(|error| error.to_string())?;
+    let overrides = guard(&state.store)?
+        .model_context_overrides()
+        .unwrap_or_default();
+    let current = runtime::prepared_models(&settings, &overrides);
+    let model = current
+        .iter()
+        .find(|model| model.id == model_id)
+        .cloned()
+        .ok_or("That model is not in a scanned folder.")?;
+    let chosen = clamp_context_step(context, model.context_max.max(2_048));
+    guard(&state.store)?
+        .set_model_context(&model_id, chosen)
+        .map_err(|error| error.to_string())?;
+    let overrides = guard(&state.store)?
+        .model_context_overrides()
+        .unwrap_or_default();
+    {
+        let mut process = guard(&state.llama)?;
+        runtime::force_restart(&mut process);
+        sync_runtime(&app, &mut process, &settings, &overrides)?;
+    }
+    runtime::prepared_models(&settings, &overrides)
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .ok_or_else(|| "That model is not in a scanned folder.".into())
+}
+
+fn spawn_reply(app: AppHandle, state: &AppState, chat_id: &str) -> Result<SendStarted, String> {
+    let chat = guard(&state.store)?
+        .get_chat(chat_id)
+        .map_err(|error| error.to_string())?;
+    if chat.model_id.trim().is_empty() {
+        return Err("Pick a model first.".into());
+    }
+    let Some(user) = chat
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .cloned()
+    else {
+        return Err("There is no message to resend.".into());
+    };
+    let settings = guard(&state.store)?
+        .get_settings()
+        .map_err(|error| error.to_string())?;
+    let overrides = guard(&state.store)?
+        .model_context_overrides()
+        .unwrap_or_default();
+    vision_gate(
+        &settings,
+        &overrides,
+        chat.provider,
+        &chat.model_id,
+        chat_has_images(&chat),
+    )?;
+    let origin = if chat.provider == ProviderId::Local {
+        local_origin(state)?
+    } else {
+        default_origin(chat.provider).to_string()
+    };
+    let key = if chat.provider.needs_key() {
+        KeychainStore
+            .get_key(chat.provider.slug())
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let mut outgoing = Vec::new();
+    for message in &chat.messages {
+        let mut images = Vec::new();
+        for file in &message.attachments {
+            if let Ok((_, image)) = load_image(&state.data_dir, &file.path) {
+                images.push(image);
+            }
+        }
+        let mut item = OutgoingMessage::text(message.role.clone(), message.content.clone());
+        item.images = images;
+        outgoing.push(item);
+    }
+    let assistant = new_message(
+        "assistant",
+        "",
+        Vec::new(),
+        Some(chat.provider),
+        Some(chat.model_id.clone()),
+    );
+    let limit = context_limit(chat.provider, &chat.model_id, &settings, &overrides);
+    let prior_parts: Vec<String> = chat.messages.iter().map(|message| message.content.clone()).collect();
+    let prior_tokens = estimate_thread_tokens(&prior_parts);
+    guard(&state.store)?
+        .insert_message(&chat.id, &assistant)
+        .map_err(|error| error.to_string())?;
+    guard(&state.store)?
+        .touch_chat(&chat.id, None, chat.context_used, limit)
+        .map_err(|error| error.to_string())?;
+    let flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut cancels = guard(&state.cancels)?;
+        if let Some(previous) = cancels.insert(chat.id.clone(), flag.clone()) {
+            previous.store(true, Ordering::Relaxed);
+        }
+    }
+    let request = CompletionRequest {
+        provider: chat.provider,
+        model: chat.model_id.clone(),
+        messages: outgoing,
+        settings: chat.settings.clone(),
+        origin,
+        tools: Vec::new(),
+    };
+    let client = state.client.clone();
+    let chat_id = chat.id.clone();
+    let assistant_id = assistant.id.clone();
+    let title = chat.title.clone();
+    tauri::async_runtime::spawn(async move {
+        run_stream(
+            app,
+            client,
+            request,
+            key,
+            flag,
+            chat_id,
+            assistant_id,
+            title,
+            limit,
+            prior_tokens,
+        )
+        .await;
+    });
+    Ok(SendStarted {
+        user,
+        assistant,
+        title: chat.title,
+    })
+}
+
+fn context_limit(
+    provider: ProviderId,
+    model_id: &str,
+    settings: &AppSettings,
+    overrides: &HashMap<String, u32>,
+) -> u32 {
     if provider == ProviderId::Local {
-        local_context.max(512)
+        runtime::prepared_models(settings, overrides)
+            .into_iter()
+            .find(|model| model.id == model_id)
+            .map(|model| model.context_limit)
+            .unwrap_or(settings.context_length)
+            .max(512)
     } else {
         default_context_limit(provider, model_id)
+    }
+}
+
+fn chat_has_images(chat: &Chat) -> bool {
+    chat.messages.iter().any(|message| !message.attachments.is_empty())
+}
+
+fn vision_gate(
+    settings: &AppSettings,
+    overrides: &HashMap<String, u32>,
+    provider: ProviderId,
+    model_id: &str,
+    has_images: bool,
+) -> Result<(), String> {
+    if provider != ProviderId::Local || !has_images {
+        return Ok(());
+    }
+    let models = runtime::prepared_models(settings, overrides);
+    let Some(model) = models.iter().find(|model| model.id == model_id) else {
+        return Ok(());
+    };
+    if model.mmproj_path.is_some() {
+        return Ok(());
+    }
+    if looks_like_vision(&model.name) {
+        Err("This vision model needs a matching mmproj GGUF next to the model, or in a scanned folder.".into())
+    } else {
+        Err("This model can't see images. Pick a vision model, or put a matching mmproj GGUF next to it.".into())
     }
 }
 

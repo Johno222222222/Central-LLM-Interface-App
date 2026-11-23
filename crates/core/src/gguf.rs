@@ -6,14 +6,19 @@ use std::path::Path;
 pub struct GgufMeta {
     pub architecture: Option<String>,
     pub context_length: Option<u32>,
+    pub block_count: Option<u32>,
+    pub embedding_length: Option<u32>,
+    pub head_count: Option<u32>,
+    pub head_count_kv: Option<u32>,
 }
 
-/// Read just enough GGUF metadata to name a family and a context window.
-/// A broken or partial file returns `None` so the model can still be listed.
+/// Read the start of a GGUF for architecture, context, and attention shape.
+/// The rest of a multi-gigabyte file is left on disk.
 pub fn read_gguf_meta(path: &Path) -> Option<GgufMeta> {
     let mut file = File::open(path).ok()?;
-    let mut data = Vec::new();
-    file.read_to_end(&mut data).ok()?;
+    let mut data = vec![0u8; 32 * 1024 * 1024];
+    let read = file.read(&mut data).ok()?;
+    data.truncate(read);
     parse_gguf_meta(&data)
 }
 
@@ -31,26 +36,57 @@ pub fn parse_gguf_meta(data: &[u8]) -> Option<GgufMeta> {
     }
     let kv_count = u64::from_le_bytes(data[16..24].try_into().ok()?);
     let mut cursor = 24usize;
-    let mut architecture = None;
-    let mut context_length = None;
+    let mut meta = GgufMeta {
+        architecture: None,
+        context_length: None,
+        block_count: None,
+        embedding_length: None,
+        head_count: None,
+        head_count_kv: None,
+    };
     for _ in 0..kv_count {
-        let key = read_string(data, &mut cursor)?;
-        let value_type = read_u32(data, &mut cursor)?;
-        if key == "general.architecture" && value_type == 8 {
-            architecture = Some(read_string(data, &mut cursor)?);
+        let Some(key) = read_string(data, &mut cursor) else {
+            break;
+        };
+        let Some(value_type) = read_u32(data, &mut cursor) else {
+            break;
+        };
+        let stored = if key == "general.architecture" && value_type == 8 {
+            meta.architecture = read_string(data, &mut cursor);
+            meta.architecture.is_some()
         } else if key.ends_with(".context_length") && (value_type == 4 || value_type == 10) {
-            context_length = Some(read_uint(data, &mut cursor, value_type)?);
+            meta.context_length = read_uint(data, &mut cursor, value_type);
+            meta.context_length.is_some()
+        } else if key.ends_with(".block_count") && (value_type == 4 || value_type == 10) {
+            meta.block_count = read_uint(data, &mut cursor, value_type);
+            meta.block_count.is_some()
+        } else if key.ends_with(".embedding_length") && (value_type == 4 || value_type == 10) {
+            meta.embedding_length = read_uint(data, &mut cursor, value_type);
+            meta.embedding_length.is_some()
+        } else if key.ends_with(".attention.head_count") && (value_type == 4 || value_type == 10) {
+            meta.head_count = read_uint(data, &mut cursor, value_type);
+            meta.head_count.is_some()
+        } else if key.ends_with(".attention.head_count_kv") && (value_type == 4 || value_type == 10)
+        {
+            meta.head_count_kv = read_uint(data, &mut cursor, value_type);
+            meta.head_count_kv.is_some()
         } else {
-            skip_value(data, &mut cursor, value_type)?;
+            skip_value(data, &mut cursor, value_type).is_some()
+        };
+        if !stored {
+            break;
         }
-        if architecture.is_some() && context_length.is_some() {
+        if meta.architecture.is_some()
+            && meta.context_length.is_some()
+            && meta.block_count.is_some()
+            && meta.embedding_length.is_some()
+            && meta.head_count.is_some()
+            && meta.head_count_kv.is_some()
+        {
             break;
         }
     }
-    Some(GgufMeta {
-        architecture,
-        context_length,
-    })
+    Some(meta)
 }
 
 fn read_u32(data: &[u8], cursor: &mut usize) -> Option<u32> {
