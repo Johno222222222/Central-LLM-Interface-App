@@ -6,7 +6,7 @@ A personal Windows desktop app for local and hosted chat. v0.1 is the app shell,
 
 1. Open the latest successful run of the **CI** workflow on GitHub.
 2. Download the **windows-installer** artifact.
-3. Run the setup file (`Central LLM Interface App_0.1.0_x64-setup.exe`). It installs for the current user, adds a Start menu shortcut, and includes an uninstaller.
+3. Run the setup file (`Central LLM Interface App_0.1.0_x64-setup.exe`). It installs for the current user, adds a Start menu shortcut, and includes an uninstaller. You can run it while the app is open. The setup stops the app and the bundled llama-server before it replaces files, so `llama.dll` is not left locked.
 4. Start **Central LLM Interface App** from the Start menu.
 
 You do not need Rust, Node, or a separate llama.cpp install. The setup includes a CUDA llama-server build (CUDA 13.5) so an RTX 5070 can run GGUF models. That binary comes from [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). The pinned build is `b12651`.

@@ -11,7 +11,7 @@ use std::time::Duration;
 use central_llm_core::{AppSettings, Store};
 use tauri::Manager;
 
-use crate::runtime::{apply_health, health_snapshot, probe_origin, sync_runtime};
+use crate::runtime::{apply_health, health_snapshot, probe_origin, stop, sync_runtime};
 use std::sync::atomic::AtomicBool;
 
 pub struct AppState {
@@ -120,6 +120,15 @@ pub fn run() {
             commands::clear_web_search_key,
             commands::test_web_search,
         ])
-        .run(tauri::generate_context!())
-        .expect("Central LLM Interface App failed to start");
+        .build(tauri::generate_context!())
+        .expect("Central LLM Interface App failed to start")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut process) = state.llama.lock() {
+                        stop(&mut process);
+                    }
+                }
+            }
+        });
 }

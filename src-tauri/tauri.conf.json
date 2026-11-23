@@ -48,7 +48,8 @@
       },
       "nsis": {
         "installMode": "currentUser",
-        "startMenuFolder": "Central LLM Interface App"
+        "startMenuFolder": "Central LLM Interface App",
+        "installerHooks": "nsis/hooks.nsh"
       }
     }
   }

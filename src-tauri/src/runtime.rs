@@ -38,14 +38,20 @@ impl LlamaProcess {
 
 impl Drop for LlamaProcess {
     fn drop(&mut self) {
-        stop_child(&mut self.child);
+        stop(self);
     }
+}
+
+/// Stop the bundled server. On Windows the process is also in a job that
+/// Windows kills when this process exits, including a crash or a forced close.
+pub fn stop(process: &mut LlamaProcess) {
+    stop_child(&mut process.child);
+    process.running = false;
 }
 
 pub fn force_restart(process: &mut LlamaProcess) {
     process.fingerprint.clear();
-    stop_child(&mut process.child);
-    process.running = false;
+    stop(process);
 }
 
 pub fn prepared_models(
@@ -197,6 +203,8 @@ pub fn sync_runtime(
     }
     match command.spawn() {
         Ok(child) => {
+            #[cfg(windows)]
+            assign_kill_on_close(&child);
             process.child = Some(child);
             process.running = true;
             process.fingerprint = fingerprint;
@@ -310,12 +318,57 @@ fn stop_child(slot: &mut Option<Child>) {
     };
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         let _ = Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x08000000)
             .output();
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Keep llama-server in a job that dies with this process.
+/// The handle stays open until the process itself exits, so a crash still
+/// closes it and Windows kills the server.
+#[cfg(windows)]
+fn assign_kill_on_close(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JobObjectExtendedLimitInformation,
+    };
+
+    static JOB: OnceLock<isize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return 0;
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const _,
+            std::mem::size_of_val(&info) as u32,
+        );
+        if configured == 0 {
+            return 0;
+        }
+        job as isize
+    });
+    if job == 0 {
+        return;
+    }
+    unsafe {
+        let _ = AssignProcessToJobObject(
+            job as *mut std::ffi::c_void,
+            child.as_raw_handle(),
+        );
+    }
 }
 
 pub fn validate_origin(value: &str) -> Result<(), String> {

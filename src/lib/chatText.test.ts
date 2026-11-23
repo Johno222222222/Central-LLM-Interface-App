@@ -65,6 +65,19 @@ describe("CI", () => {
   });
 });
 
+describe("installer", () => {
+  it("stops the running app before NSIS replaces llama.dll", () => {
+    const config = readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8");
+    const hooks = readFileSync(new URL("../../src-tauri/nsis/hooks.nsh", import.meta.url), "utf8");
+    expect(config).toContain('"installerHooks": "nsis/hooks.nsh"');
+    expect(hooks).toContain("NSIS_HOOK_PREINSTALL");
+    expect(hooks).toContain("NSIS_HOOK_PREUNINSTALL");
+    expect(hooks).toContain("taskkill.exe");
+    expect(hooks).toContain("/IM llama-server.exe");
+    expect(hooks).toContain("Sleep 2000");
+  });
+});
+
 function model(provider: CatalogModel["provider"], family: string, id: string): CatalogModel {
   return {
     id,
