@@ -25,40 +25,143 @@ impl SecretStore for KeychainStore {
     }
 }
 
+/// Windows Credential Manager, persisted for this user on this PC.
+/// `CRED_PERSIST_LOCAL_MACHINE` is used on purpose. The keyring crate writes
+/// `CRED_PERSIST_ENTERPRISE`, and on a machine that is not domain-joined
+/// (including GitHub's Windows runners) that write can succeed while the
+/// following read comes back empty.
 #[cfg(windows)]
 fn write_secret(account: &str, secret: &str) -> Result<(), CoreError> {
-    let entry = keyring::Entry::new(SERVICE, account)
-        .map_err(|error| CoreError::Message(error.to_string()))?;
-    entry.set_password(secret).map_err(|error| {
-        CoreError::Message(format!(
-            "Could not save the key in Windows Credential Manager. {error}"
-        ))
-    })
+    use windows_sys::Win32::Security::Credentials::{
+        CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    };
+
+    let target = wide(&target_name(account));
+    let user = wide(account);
+    let mut blob = utf16_le_bytes(secret);
+    let credential = CREDENTIALW {
+        Flags: 0,
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target.as_ptr() as *mut u16,
+        Comment: std::ptr::null_mut(),
+        LastWritten: zero_filetime(),
+        CredentialBlobSize: blob.len() as u32,
+        CredentialBlob: blob.as_mut_ptr(),
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        AttributeCount: 0,
+        Attributes: std::ptr::null_mut(),
+        TargetAlias: std::ptr::null_mut(),
+        UserName: user.as_ptr() as *mut u16,
+    };
+    let ok = unsafe { CredWriteW(&credential, 0) };
+    blob.fill(0);
+    if ok == 0 {
+        return Err(credential_error("save"));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
 fn read_secret(account: &str) -> Result<Option<String>, CoreError> {
-    let entry = keyring::Entry::new(SERVICE, account)
-        .map_err(|error| CoreError::Message(error.to_string()))?;
-    match entry.get_password() {
-        Ok(value) => Ok(Some(value)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(CoreError::Message(format!(
-            "Could not read the key from Windows Credential Manager. {error}"
-        ))),
+    use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+    use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CRED_TYPE_GENERIC};
+
+    let target = wide(&target_name(account));
+    let mut credential = std::ptr::null_mut();
+    let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) };
+    if ok == 0 {
+        let code = last_error();
+        if code == ERROR_NOT_FOUND {
+            return Ok(None);
+        }
+        return Err(CoreError::Message(format!(
+            "Could not read the key from Windows Credential Manager (error {code})."
+        )));
     }
+    let result = unsafe { decode_blob(&*credential) };
+    unsafe { CredFree(credential as *const std::ffi::c_void) };
+    result.map(Some)
 }
 
 #[cfg(windows)]
 fn delete_secret(account: &str) -> Result<(), CoreError> {
-    let entry = keyring::Entry::new(SERVICE, account)
-        .map_err(|error| CoreError::Message(error.to_string()))?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(CoreError::Message(format!(
-            "Could not remove the key from Windows Credential Manager. {error}"
-        ))),
+    use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+    use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
+
+    let target = wide(&target_name(account));
+    let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+    if ok == 0 {
+        let code = last_error();
+        if code == ERROR_NOT_FOUND {
+            return Ok(());
+        }
+        return Err(CoreError::Message(format!(
+            "Could not remove the key from Windows Credential Manager (error {code})."
+        )));
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn target_name(account: &str) -> String {
+    format!("{account}.{SERVICE}")
+}
+
+#[cfg(windows)]
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn utf16_le_bytes(value: &str) -> Vec<u8> {
+    value
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect()
+}
+
+#[cfg(windows)]
+fn zero_filetime() -> windows_sys::Win32::Foundation::FILETIME {
+    windows_sys::Win32::Foundation::FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    }
+}
+
+#[cfg(windows)]
+fn last_error() -> u32 {
+    unsafe { windows_sys::Win32::Foundation::GetLastError() }
+}
+
+#[cfg(windows)]
+fn credential_error(action: &str) -> CoreError {
+    CoreError::Message(format!(
+        "Could not {action} the key in Windows Credential Manager (error {}).",
+        last_error()
+    ))
+}
+
+#[cfg(windows)]
+unsafe fn decode_blob(
+    credential: &windows_sys::Win32::Security::Credentials::CREDENTIALW,
+) -> Result<String, CoreError> {
+    let size = credential.CredentialBlobSize as usize;
+    if size == 0 || credential.CredentialBlob.is_null() {
+        return Ok(String::new());
+    }
+    if size % 2 != 0 {
+        return Err(CoreError::Message(
+            "The saved key in Windows Credential Manager was not valid text.".into(),
+        ));
+    }
+    let bytes = std::slice::from_raw_parts(credential.CredentialBlob, size);
+    let units = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units).map_err(|_| {
+        CoreError::Message("The saved key in Windows Credential Manager was not valid text.".into())
+    })
 }
 
 #[cfg(not(windows))]

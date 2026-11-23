@@ -52,4 +52,4 @@ jobs:
         with:
           name: windows-installer
           if-no-files-found: error
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: target/release/bundle/nsis/*.exe
