@@ -479,6 +479,9 @@ function streamPreview(chat: Chat, assistant: ChatMessage, reply: string) {
           contextUsed: estimateTokens(reply),
           contextLimit: chat.contextLimit,
           cancelled: false,
+          status: "done",
+          stopReason: "",
+          finishedAt: new Date().toISOString(),
         });
       }
     }
@@ -535,6 +538,9 @@ function previewSend(chatId: string, content: string, attachmentPaths: string[])
         contextLimit: chat.contextLimit,
         cancelled: false,
         title: chat.title,
+        status: "done",
+        stopReason: "",
+        finishedAt: new Date().toISOString(),
       };
       for (const listener of listeners) listener.onDone(done);
     }

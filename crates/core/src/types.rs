@@ -193,6 +193,10 @@ pub struct ToolStep {
     pub result: Option<String>,
     /// running, approval, done, denied, or error
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -297,6 +301,17 @@ pub struct ChatMessage {
     pub model_id: Option<String>,
     #[serde(default)]
     pub tool_steps: Vec<ToolStep>,
+    /// done, stopped, cut_off, or error. Empty on older messages.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub stop_reason: String,
+    #[serde(default)]
+    pub finished_at: String,
+    #[serde(default)]
+    pub thinking_started_at: String,
+    #[serde(default)]
+    pub thinking_finished_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

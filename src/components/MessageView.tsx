@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "../api";
-import { providerLabel } from "../lib/chatText";
+import { formatElapsed, providerLabel } from "../lib/chatText";
 import type { CatalogModel, ChatMessage } from "../types";
 
 const CONTEXT_STEPS = [2048, 4096, 8192, 16384, 32768, 65536, 131072];
@@ -22,11 +22,13 @@ export function MessageView({
   onRetry,
   onBranch,
   onFeedback,
+  now,
 }: {
   message: ChatMessage;
   streaming: boolean;
   models: CatalogModel[];
   busy: boolean;
+  now: number;
   onEdit: (message: ChatMessage) => void;
   onRetry: (message: ChatMessage, modelId?: string) => void;
   onBranch: (message: ChatMessage) => void;
@@ -159,6 +161,7 @@ export function MessageView({
               <details key={step.id} className="thinking" open={step.status === "running" || step.status === "approval"}>
                 <summary>
                   {step.name} · {step.status}
+                  {stepDuration(step, now) ? ` · ${stepDuration(step, now)}` : ""}
                 </summary>
                 {step.name === "update_settings" && step.status === "approval" ? (
                   <div className="approval-card">
@@ -182,8 +185,13 @@ export function MessageView({
           </div>
         ) : null}
         {message.thinking ? (
-          <details className="thinking" open={streaming}>
-            <summary>Thinking</summary>
+          <details className="thinking" open={streaming && !message.thinkingFinishedAt}>
+            <summary>
+              Thinking
+              {phaseDuration(message.thinkingStartedAt, message.thinkingFinishedAt, now, streaming && !message.thinkingFinishedAt)
+                ? ` · ${phaseDuration(message.thinkingStartedAt, message.thinkingFinishedAt, now, streaming && !message.thinkingFinishedAt)}`
+                : ""}
+            </summary>
             <p>{message.thinking}</p>
           </details>
         ) : null}
@@ -193,9 +201,44 @@ export function MessageView({
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ code: CodeBlock }}>
           {body}
         </ReactMarkdown>
+        {!user ? <ReplyStatus message={message} streaming={streaming} now={now} /> : null}
       </div>
     </article>
   );
+}
+
+function ReplyStatus({ message, streaming, now }: { message: ChatMessage; streaming: boolean; now: number }) {
+  const elapsed = phaseDuration(message.createdAt, message.finishedAt, now, streaming);
+  if (!streaming && !message.status) return null;
+  const label = streaming ? "Working" : statusLabel(message.status, message.stopReason);
+  const kind = streaming ? "working" : message.status || "done";
+  return (
+    <p className={`reply-meta ${kind}`}>
+      {label}
+      {elapsed ? ` · ${elapsed}` : ""}
+    </p>
+  );
+}
+
+function statusLabel(status?: string, reason?: string) {
+  if (status === "stopped") return "Stopped";
+  if (status === "cut_off") return reason ? `Cut off · ${reason}` : "Cut off";
+  if (status === "error") return reason ? `Error · ${reason}` : "Error";
+  return "Done";
+}
+
+function stepDuration(step: { startedAt?: string; finishedAt?: string; status: string }, now: number) {
+  const live = step.status === "running" || step.status === "approval";
+  return phaseDuration(step.startedAt, step.finishedAt, now, live);
+}
+
+function phaseDuration(start: string | undefined, end: string | undefined, now: number, live: boolean) {
+  if (!start) return "";
+  const from = Date.parse(start);
+  if (Number.isNaN(from)) return "";
+  const to = !live && end ? Date.parse(end) : now;
+  if (Number.isNaN(to)) return "";
+  return formatElapsed(Math.max(0, to - from));
 }
 
 function CodeBlock({ className, children }: { className?: string; children?: ReactNode }) {

@@ -1,13 +1,19 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { NAV } from "../types";
-import { cycleEffort, formatContext, groupModels } from "./chatText";
+import { cycleEffort, formatContext, formatElapsed, groupModels } from "./chatText";
 import type { CatalogModel } from "../types";
 
 describe("context meter", () => {
   it("matches the spec example", () => {
     expect(formatContext(118_800, 256_000)).toBe("118.8K/256K");
     expect(formatContext(8192, 8192)).toBe("8.2K/8.2K");
+  });
+
+  it("formats a reply duration", () => {
+    expect(formatElapsed(0)).toBe("0:00");
+    expect(formatElapsed(3200)).toBe("0:03");
+    expect(formatElapsed(65_000)).toBe("1:05");
   });
 });
 

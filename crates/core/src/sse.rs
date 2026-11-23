@@ -11,6 +11,8 @@ pub enum StreamPiece {
         completion: u32,
     },
     Error(String),
+    /// Why the provider closed this generation, such as `stop` or `length`.
+    Finish(String),
     /// A fragment of a tool call. `id` and `name` arrive once; `arguments` may arrive in pieces.
     ToolDelta {
         index: u32,
@@ -136,6 +138,7 @@ fn pieces_from_openai(value: &Value) -> Vec<StreamPiece> {
         value.pointer("/usage/prompt_tokens"),
         value.pointer("/usage/completion_tokens"),
     );
+    push_finish(&mut out, value.pointer("/choices/0/finish_reason"));
     out
 }
 
@@ -223,6 +226,7 @@ fn pieces_from_anthropic(value: &Value) -> Vec<StreamPiece> {
                 value.pointer("/usage/input_tokens"),
                 value.pointer("/usage/output_tokens"),
             );
+            push_finish(&mut out, value.pointer("/delta/stop_reason"));
         }
         _ => {}
     }
@@ -237,6 +241,7 @@ fn pieces_from_gemini(value: &Value) -> Vec<StreamPiece> {
     {
         out.push(StreamPiece::Error(message.to_string()));
     }
+    push_finish(&mut out, value.pointer("/candidates/0/finishReason"));
     if let Some(parts) = value
         .pointer("/candidates/0/content/parts")
         .and_then(|item| item.as_array())
@@ -277,6 +282,14 @@ fn pieces_from_gemini(value: &Value) -> Vec<StreamPiece> {
         value.pointer("/usageMetadata/candidatesTokenCount"),
     );
     out
+}
+
+fn push_finish(out: &mut Vec<StreamPiece>, reason: Option<&Value>) {
+    if let Some(reason) = reason.and_then(|item| item.as_str()) {
+        if !reason.is_empty() && reason != "null" {
+            out.push(StreamPiece::Finish(reason.to_string()));
+        }
+    }
 }
 
 fn push_usage(out: &mut Vec<StreamPiece>, prompt: Option<&Value>, completion: Option<&Value>) {
