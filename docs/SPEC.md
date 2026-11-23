@@ -304,9 +304,11 @@ Each slice below is meant to be one cloud-agent run. Stop when that slice's acce
 | v0.1.1 | Tools menu and extra GGUF folders | 1 |
 | v0.1.2 | Context, hidden tools, vision projectors, message actions | 1 |
 | v0.1.3 | App awareness: read the app and approve setting changes | 1 |
+| v0.1.4 | Response timers, before Create | 1 |
 | v0.2 | Create with ComfyUI import | 4 |
 | v0.3 | Models browser | 2 |
-| Later | Benchmark, voice, code, tools, then Mac and Linux | As needed |
+| Later | Benchmark, voice, code, desktop control, then Mac and Linux | As needed |
+| Last | Smart context helper | 1 |
 
 ### v0.1 Chat
 
@@ -346,7 +348,7 @@ Those names are reserved. They are not implemented in v0.1.1.
 
 ### v0.1.2 Polish
 
-From a real Windows test on an RTX 5070 with 12 GB. This stays inside chat and the local server. App awareness is still the next milestone, then v0.2 Create.
+From a real Windows test on an RTX 5070 with 12 GB. This stays inside chat and the local server. App awareness followed in v0.1.3. Response timers are v0.1.4, then v0.2 Create.
 
 - The bundled llama-server picks a context from VRAM and model size. A 9B Q4_K_M on 12 GB gets about 32K, not the old 8.2K default. Settings and the chat meter have a per-model slider. The choice is saved, the server restarts when it changes, and the token pill shows that window.
 - Screenshot captures the screen in the app process. Shell, screenshot, and MCP never open a console window.
@@ -359,7 +361,7 @@ From a real Windows test on an RTX 5070 with 12 GB. This stays inside chat and t
 
 ### v0.1.3 App awareness
 
-Chat can look at this app and, with a yes on each change, update settings. The Tools menu has an App toggle that starts on. Reads do not ask. Desktop mouse and keyboard stay a later milestone. Next is v0.2 Create with ComfyUI.
+Chat can look at this app and, with a yes on each change, update settings. The Tools menu has an App toggle that starts on. Reads do not ask. Desktop mouse and keyboard stay a later milestone. Next is v0.1.4 response timers, then v0.2 Create with ComfyUI.
 
 - `get_app_state` reports the open tab, selected model and provider, context size, enabled tools, approved folders, and the app version.
 - `list_settings` lists setting values with a short description of each. Provider keys are only "set" or "not set".
@@ -370,6 +372,21 @@ Chat can look at this app and, with a yes on each change, update settings. The T
 - `open_tab` opens Chat, Create, Models, or Settings, and can scroll to a setting.
 
 Imported workflows wait for v0.2. Nothing here deletes models or starts a ComfyUI run.
+
+Johno tested this on Windows with a local Qwen 9B at 16K context and with Gemini through OpenRouter. App tools worked. The local reply stopped mid-thinking, and the hosted reply finished. That is why the next slice is response timers, not Create.
+
+### v0.1.4 Response timers
+
+Before v0.2 Create. Docs only until this slice is started. Do not build it as part of v0.1.3.
+
+A reply should show whether it is still working or already finished.
+
+- A live elapsed counter for the whole assistant response, from send until the reply ends.
+- A live elapsed counter on each active step: thinking, and each tool call. When a step ends, leave the final duration on it.
+- At the end of every assistant message, a clear status: Done, Stopped, Cut off, or Error.
+- For a local model, say why it stopped: context limit, max tokens, or an error. A cut-off mid-thinking should read as Cut off, not as a finished answer.
+
+Done when Johno can tell a finished reply from one that is still running, and a local stop names the reason.
 
 ### Near the end: desktop look-around and control
 
@@ -404,9 +421,18 @@ Looking is the screenshot tool from v0.1.1, used on purpose so the model can see
 - Think, reasoning effort, Phone, and Small-Model.
 - Built-in Create recipes, once import is reliable: Image tools, Video and 3D Generate modes (text, image, and multiview), plus Animate, Extend, and the rest of the agreed sub-options.
 - Optional Ollama backend.
-- App awareness: read settings, installed models, workflows, and chats, and change settings only with approval of each change.
 - Desktop look-around and control: screenshots first, then mouse and keyboard with approval of each action.
-- macOS and Linux, as one of the very last steps, not right after v0.1.
+- macOS and Linux, near the end, not right after v0.1.
+
+App awareness shipped in v0.1.3. Do not build it again.
+
+### Last: Smart context helper
+
+The last milestone, after Create, the model browser, Benchmark, voice, code, desktop control, and the Mac and Linux builds. Docs only until that slice is started.
+
+When a chat hits the context limit on a local model, raise that model's context as far as VRAM allows, including KV-cache quantization if that is what makes a larger window fit. Restart the bundled server and resume the reply. If the context cannot go higher, show a plain-English popup that says why, such as VRAM full, and offer three choices: summarize and continue, start a fresh chat, or switch to a cloud model.
+
+Done when a local chat that runs out of context either continues in a larger window on its own, or stops with that popup and those three choices.
 
 ## Decisions
 
