@@ -99,6 +99,27 @@ impl Store {
             "tools_json",
             "tools_json TEXT NOT NULL DEFAULT '[]'",
         )?;
+        self.ensure_column("messages", "status", "status TEXT NOT NULL DEFAULT ''")?;
+        self.ensure_column(
+            "messages",
+            "stop_reason",
+            "stop_reason TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "messages",
+            "finished_at",
+            "finished_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "messages",
+            "thinking_started_at",
+            "thinking_started_at TEXT NOT NULL DEFAULT ''",
+        )?;
+        self.ensure_column(
+            "messages",
+            "thinking_finished_at",
+            "thinking_finished_at TEXT NOT NULL DEFAULT ''",
+        )?;
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS model_prefs (
@@ -211,7 +232,7 @@ impl Store {
         let summary = self.chat_summary(id)?;
         let settings = self.chat_settings(id)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, role, content, thinking, attachments_json, created_at, provider, model_id, tools_json
+            "SELECT id, role, content, thinking, attachments_json, created_at, provider, model_id, tools_json, status, stop_reason, finished_at, thinking_started_at, thinking_finished_at
              FROM messages WHERE chat_id = ?1 ORDER BY created_at ASC, rowid ASC",
         )?;
         let messages = stmt
@@ -229,6 +250,11 @@ impl Store {
                     provider: provider.as_deref().and_then(ProviderId::from_slug),
                     model_id: row.get(7)?,
                     tool_steps: serde_json::from_str(&tools).unwrap_or_default(),
+                    status: row.get(9)?,
+                    stop_reason: row.get(10)?,
+                    finished_at: row.get(11)?,
+                    thinking_started_at: row.get(12)?,
+                    thinking_finished_at: row.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -340,6 +366,29 @@ impl Store {
                 content,
                 thinking,
                 serde_json::to_string(tool_steps).unwrap_or_else(|_| "[]".into()),
+                id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_reply_meta(
+        &self,
+        id: &str,
+        status: &str,
+        stop_reason: &str,
+        finished_at: &str,
+        thinking_started_at: &str,
+        thinking_finished_at: &str,
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE messages SET status = ?1, stop_reason = ?2, finished_at = ?3, thinking_started_at = ?4, thinking_finished_at = ?5 WHERE id = ?6",
+            params![
+                status,
+                stop_reason,
+                finished_at,
+                thinking_started_at,
+                thinking_finished_at,
                 id
             ],
         )?;
@@ -500,6 +549,11 @@ pub fn new_message(
         provider,
         model_id,
         tool_steps: Vec::new(),
+        status: String::new(),
+        stop_reason: String::new(),
+        finished_at: String::new(),
+        thinking_started_at: String::new(),
+        thinking_finished_at: String::new(),
     }
 }
 

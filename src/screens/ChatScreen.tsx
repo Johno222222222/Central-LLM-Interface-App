@@ -21,6 +21,7 @@ export function ChatScreen() {
   const buffers = useRef(new Map<string, { text: string; thinking: string }>());
   const fileRef = useRef<HTMLInputElement>(null);
   const chatId = chat?.id;
+  const now = useTicker(Boolean(streamingId));
 
   useEffect(() => {
     let alive = true;
@@ -31,7 +32,18 @@ export function ChatScreen() {
         current.text += event.text;
         current.thinking += event.thinking;
         buffers.current.set(event.messageId, current);
-        setChat((existing) => paint(existing, event.messageId, buffers.current));
+        setChat((existing) => {
+          const painted = paint(existing, event.messageId, buffers.current);
+          if (!painted || !event.thinking) return painted;
+          return {
+            ...painted,
+            messages: painted.messages.map((message) =>
+              message.id === event.messageId && !message.thinkingStartedAt
+                ? { ...message, thinkingStartedAt: new Date().toISOString() }
+                : message,
+            ),
+          };
+        });
       },
       onToolStep: (event) => {
         setChat((existing) => {
@@ -63,8 +75,16 @@ export function ChatScreen() {
             contextUsed: event.contextUsed,
             contextLimit: event.contextLimit,
             messages: painted.messages.map((message) =>
-              message.id === event.messageId && event.error && !message.content
-                ? { ...message, content: event.error }
+              message.id === event.messageId
+                ? {
+                    ...message,
+                    content: event.status === "error" && event.error && !message.content ? event.error : message.content,
+                    status: event.status || (event.cancelled ? "stopped" : "done"),
+                    stopReason: event.stopReason || "",
+                    finishedAt: event.finishedAt || new Date().toISOString(),
+                    thinkingStartedAt: event.thinkingStartedAt || message.thinkingStartedAt,
+                    thinkingFinishedAt: event.thinkingFinishedAt || message.thinkingFinishedAt,
+                  }
                 : message,
             ),
           };
@@ -76,7 +96,7 @@ export function ChatScreen() {
               : item,
           ),
         );
-        if (event.error) setError(event.error);
+        if (event.status === "error" && event.error) setError(event.error);
       },
     }).then((unlisten) => {
       if (!alive) unlisten();
@@ -279,6 +299,7 @@ export function ChatScreen() {
                 }}
                 onRetry={(item, modelId) => void retry(item, modelId)}
                 onBranch={(item) => void branch(item)}
+                now={now}
                 onFeedback={(item, rating, note) => {
                   if (!chat) return;
                   void api.saveFeedback(chat.id, item.id, rating, note).catch((reason: unknown) => setError(messageOf(reason)));
@@ -443,6 +464,16 @@ export function ChatScreen() {
       </section>
     </div>
   );
+}
+
+function useTicker(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return now;
 }
 
 function pendingStep(chat: Chat | null, id: string) {

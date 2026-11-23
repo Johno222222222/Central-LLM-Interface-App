@@ -377,9 +377,7 @@ Johno tested this on Windows with a local Qwen 9B at 16K context and with Gemini
 
 ### v0.1.4 Response timers
 
-Before v0.2 Create. Docs only until this slice is started. Do not build it as part of v0.1.3.
-
-A reply should show whether it is still working or already finished.
+Before v0.2 Create. A reply shows whether it is still working or already finished.
 
 - A live elapsed counter for the whole assistant response, from send until the reply ends.
 - A live elapsed counter on each active step: thinking, and each tool call. When a step ends, leave the final duration on it.

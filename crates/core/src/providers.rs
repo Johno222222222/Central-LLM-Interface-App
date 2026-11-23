@@ -63,6 +63,7 @@ pub struct StreamOutcome {
     pub completion_tokens: Option<u32>,
     pub cancelled: bool,
     pub error: Option<String>,
+    pub finish_reason: Option<String>,
     pub tool_calls: Vec<ToolCall>,
 }
 
@@ -575,6 +576,11 @@ fn apply_piece(outcome: &mut StreamOutcome, piece: StreamPiece) {
             outcome.completion_tokens = Some(completion);
         }
         StreamPiece::Error(message) => outcome.error = Some(message),
+        StreamPiece::Finish(reason) => {
+            if !reason.trim().is_empty() {
+                outcome.finish_reason = Some(reason);
+            }
+        }
         StreamPiece::ToolDelta {
             index,
             id,

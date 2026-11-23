@@ -7,7 +7,7 @@ use base64::Engine;
 use std::collections::HashMap;
 
 use central_llm_core::{
-    catalog_from_ids, clamp_context_step, default_context_limit, default_origin,
+    catalog_from_ids, clamp_context_step, classify_reply, default_context_limit, default_origin,
     estimate_thread_tokens, friendly_http_error, hosted_catalog, loaded_ids, looks_like_vision,
     new_message, parse_model_ids, parse_router_models, redact, stream_completion, test_provider,
     test_url, title_from_message, tool_guidance, AppSettings, Attachment, CatalogModel, Chat,
@@ -66,6 +66,11 @@ struct ChatDone {
     error: Option<String>,
     cancelled: bool,
     title: String,
+    status: String,
+    stop_reason: String,
+    finished_at: String,
+    thinking_started_at: String,
+    thinking_finished_at: String,
 }
 
 fn guard<T>(mutex: &std::sync::Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, String> {
@@ -632,6 +637,12 @@ async fn run_stream(
     let mut error = None;
     let mut cancelled = false;
     let mut used = prior_tokens;
+    let mut finish_reason: Option<String> = None;
+    let mut prompt_tokens: Option<u32> = None;
+    let mut completion_tokens: Option<u32> = None;
+    let mut thinking_started_at = String::new();
+    let mut thinking_finished_at = String::new();
+    let mut thinking_open = false;
 
     for _ in 0..MAX_TOOL_ROUNDS {
         if flag.load(Ordering::Relaxed) {
@@ -660,6 +671,10 @@ async fn run_stream(
                     );
                 }
                 StreamPiece::Thinking(chunk) => {
+                    if thinking_started_at.is_empty() {
+                        thinking_started_at = central_llm_core::now_stamp();
+                    }
+                    thinking_open = true;
                     thinking.push_str(chunk);
                     let _ = app.emit(
                         "chat-delta",
@@ -673,6 +688,7 @@ async fn run_stream(
                 }
                 StreamPiece::Usage { .. }
                 | StreamPiece::Error(_)
+                | StreamPiece::Finish(_)
                 | StreamPiece::ToolDelta { .. } => {}
             }
             if last_save.elapsed() > Duration::from_millis(700) {
@@ -692,8 +708,19 @@ async fn run_stream(
         final_text = outcome.text;
         final_thinking = outcome.thinking;
         cancelled = outcome.cancelled;
+        if let Some(reason) = outcome.finish_reason.clone() {
+            finish_reason = Some(reason);
+        }
         if let Some(prompt) = outcome.prompt_tokens {
             used = prompt;
+            prompt_tokens = Some(prompt);
+        }
+        if let Some(completion) = outcome.completion_tokens {
+            completion_tokens = Some(completion);
+        }
+        if thinking_open {
+            thinking_finished_at = central_llm_core::now_stamp();
+            thinking_open = false;
         }
         if outcome.tool_calls.is_empty() || cancelled {
             break;
@@ -708,6 +735,8 @@ async fn run_stream(
                 arguments: call.arguments.clone(),
                 result: None,
                 status: "running".into(),
+                started_at: Some(central_llm_core::now_stamp()),
+                finished_at: None,
             };
             if central_llm_core::needs_command_approval(&call.name) {
                 if call.name == "update_settings" {
@@ -715,6 +744,7 @@ async fn run_stream(
                     {
                         Ok(summary) => step.arguments = summary,
                         Err(reason) => {
+                            step.finished_at = Some(central_llm_core::now_stamp());
                             step.status = "error".into();
                             step.result = Some(reason.clone());
                             steps.push(step.clone());
@@ -731,6 +761,7 @@ async fn run_stream(
                 emit_step(&app, &chat_id, &assistant_id, &step);
                 let approved = wait_approval(&app, &call.id).await;
                 if !approved {
+                    step.finished_at = Some(central_llm_core::now_stamp());
                     step.status = "denied".into();
                     step.result = Some("You denied this.".into());
                     steps.push(step.clone());
@@ -743,6 +774,7 @@ async fn run_stream(
                 }
             }
             let result_text = run_tool(&app, &call.name, &call.arguments, &settings, &chat_id).await;
+            step.finished_at = Some(central_llm_core::now_stamp());
             step.status = "done".into();
             step.result = Some(result_text.clone());
             steps.push(step.clone());
@@ -766,6 +798,22 @@ async fn run_stream(
         }
     }
 
+    if thinking_open && thinking_finished_at.is_empty() {
+        thinking_finished_at = central_llm_core::now_stamp();
+    }
+    let reply_end = classify_reply(
+        cancelled,
+        error.as_deref(),
+        finish_reason.as_deref(),
+        prompt_tokens.or(Some(prior_tokens)),
+        completion_tokens,
+        request.settings.max_tokens,
+        limit,
+    );
+    let finished_at = central_llm_core::now_stamp();
+    if reply_end.status == "cut_off" {
+        error = None;
+    }
     if let Ok(store) = app.state::<AppState>().store.lock() {
         let _ = store.save_tool_steps(
             &assistant_id,
@@ -778,6 +826,14 @@ async fn run_stream(
             &steps,
         );
         let _ = store.touch_chat(&chat_id, Some(&title), used, limit);
+        let _ = store.save_reply_meta(
+            &assistant_id,
+            reply_end.status,
+            &reply_end.reason,
+            &finished_at,
+            &thinking_started_at,
+            &thinking_finished_at,
+        );
     }
     let _ = app.emit(
         "chat-done",
@@ -791,6 +847,11 @@ async fn run_stream(
             error,
             cancelled,
             title,
+            status: reply_end.status.to_string(),
+            stop_reason: reply_end.reason,
+            finished_at,
+            thinking_started_at,
+            thinking_finished_at,
         },
     );
 }

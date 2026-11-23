@@ -9,6 +9,7 @@ mod gguf;
 mod llama;
 mod models;
 mod providers;
+mod reply;
 mod secrets;
 mod sse;
 mod tokens;
@@ -29,6 +30,7 @@ pub use models::{
     scan_all_model_dirs, scan_gguf_dir, select_model_ids, suggest_context, write_models_preset,
     CONTEXT_STEPS, DEFAULT_VRAM_BYTES,
 };
+pub use reply::classify_reply;
 pub use providers::{
     build_body, build_headers, completion_url, default_origin, friendly_http_error,
     parse_model_ids, redact, stream_completion, test_provider, test_url, CompletionRequest,

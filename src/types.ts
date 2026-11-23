@@ -41,6 +41,8 @@ export interface ToolStep {
   arguments: string;
   result?: string;
   status: string;
+  startedAt?: string;
+  finishedAt?: string;
 }
 
 export interface McpServerConfig {
@@ -82,6 +84,11 @@ export interface ChatMessage {
   provider?: ProviderId;
   modelId?: string;
   toolSteps: ToolStep[];
+  status?: string;
+  stopReason?: string;
+  finishedAt?: string;
+  thinkingStartedAt?: string;
+  thinkingFinishedAt?: string;
 }
 
 export interface ChatSummary {
@@ -147,6 +154,11 @@ export interface ChatDone {
   error?: string | null;
   cancelled: boolean;
   title: string;
+  status?: string;
+  stopReason?: string;
+  finishedAt?: string;
+  thinkingStartedAt?: string;
+  thinkingFinishedAt?: string;
 }
 
 export interface SendStarted {

@@ -287,6 +287,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 4px 6px;
 }
 .thumb-row { display: flex; gap: 6px; }
+.reply-meta { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.reply-meta.cut_off { color: var(--accent); }
+.reply-meta.error { color: var(--danger); }
 .approval-card {
   margin: 8px 0;
   padding: 10px;

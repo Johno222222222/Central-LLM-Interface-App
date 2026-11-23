@@ -20,6 +20,16 @@ export function effortLabel(effort: Effort): string {
   }
 }
 
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (value: number) => value.toString().padStart(2, "0");
+  if (hours > 0) return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+  return `${minutes}:${pad(seconds)}`;
+}
+
 export function formatTokens(value: number): string {
   if (value < 1000) return String(Math.max(0, Math.round(value)));
   const tenths = Math.round(value / 100);
