@@ -144,6 +144,67 @@ pub struct ChatSettings {
     pub think: bool,
     #[serde(default)]
     pub effort: Effort,
+    /// Per-chat tool toggles. Risky tools stay off until the user turns them on.
+    #[serde(default)]
+    pub tools: ToolToggles,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolToggles {
+    #[serde(default)]
+    pub web_search: bool,
+    #[serde(default)]
+    pub web_fetch: bool,
+    #[serde(default)]
+    pub files: bool,
+    #[serde(default)]
+    pub shell: bool,
+    #[serde(default)]
+    pub screenshot: bool,
+    #[serde(default)]
+    pub mcp: bool,
+}
+
+impl Default for ToolToggles {
+    fn default() -> Self {
+        Self {
+            web_search: false,
+            web_fetch: false,
+            files: false,
+            shell: false,
+            screenshot: false,
+            mcp: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolStep {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// running, approval, done, denied, or error
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ChatSettings {
@@ -160,6 +221,7 @@ impl Default for ChatSettings {
             voice: false,
             think: false,
             effort: Effort::Default,
+            tools: ToolToggles::default(),
         }
     }
 }
@@ -177,6 +239,14 @@ pub struct AppSettings {
     pub appearance: Appearance,
     pub context_length: u32,
     pub gpu_layers: u32,
+    /// Extra GGUF folders scanned in place. The app folder stays `models_dir`.
+    #[serde(default)]
+    pub extra_model_dirs: Vec<String>,
+    /// Folders the Files tool is allowed to read. Empty means the tool cannot read anything.
+    #[serde(default)]
+    pub approved_folders: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 impl AppSettings {
@@ -191,6 +261,9 @@ impl AppSettings {
             appearance: Appearance::Dark,
             context_length: 8_192,
             gpu_layers: 99,
+            extra_model_dirs: Vec::new(),
+            approved_folders: Vec::new(),
+            mcp_servers: Vec::new(),
         }
     }
 }
@@ -218,6 +291,8 @@ pub struct ChatMessage {
     pub provider: Option<ProviderId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    #[serde(default)]
+    pub tool_steps: Vec<ToolStep>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -260,6 +335,9 @@ pub struct CatalogModel {
     pub path: Option<String>,
     pub loaded: bool,
     pub key_saved: bool,
+    /// Where a local file was found, such as "App folder" or "Locally Uncensored".
+    #[serde(default)]
+    pub source_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

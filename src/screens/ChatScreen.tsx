@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { api, isTauri, subscribe } from "../api";
 import { MessageView } from "../components/MessageView";
+import { ToolsMenu } from "../components/ToolsMenu";
 import { ModelPicker } from "../components/ModelPicker";
 import { SamplingPopover } from "../components/SamplingPopover";
 import { cycleEffort, effortLabel, estimateTokens, formatContext } from "../lib/chatText";
@@ -15,6 +16,7 @@ export function ChatScreen() {
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sampling, setSampling] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<string | null>(null);
   const buffers = useRef(new Map<string, { text: string; thinking: string }>());
   const fileRef = useRef<HTMLInputElement>(null);
   const chatId = chat?.id;
@@ -28,6 +30,25 @@ export function ChatScreen() {
         current.thinking += event.thinking;
         buffers.current.set(event.messageId, current);
         setChat((existing) => paint(existing, event.messageId, buffers.current));
+      },
+      onToolStep: (event) => {
+        setChat((existing) => {
+          if (!existing || existing.id !== event.chatId) return existing;
+          return {
+            ...existing,
+            messages: existing.messages.map((message) => {
+              if (message.id !== event.messageId) return message;
+              const steps = message.toolSteps ?? [];
+              const index = steps.findIndex((step) => step.id === event.step.id);
+              const toolSteps = index === -1 ? [...steps, event.step] : steps.map((step, i) => (i === index ? event.step : step));
+              return { ...message, toolSteps };
+            }),
+          };
+        });
+        if (event.step.status === "approval") setPendingApproval(event.step.id);
+        if (event.step.status === "done" || event.step.status === "denied") {
+          setPendingApproval((current) => (current === event.step.id ? null : current));
+        }
       },
       onDone: (event) => {
         setStreamingId((id) => (id === event.messageId ? null : id));
@@ -204,6 +225,13 @@ export function ChatScreen() {
             >
               Think
             </button>
+            {chat ? (
+              <ToolsMenu
+                settings={chat.settings}
+                disabled={Boolean(streamingId)}
+                onChange={(settings) => void saveSettings(settings)}
+              />
+            ) : null}
             <button
               type="button"
               className="chip"
@@ -284,6 +312,17 @@ export function ChatScreen() {
               </button>
             )}
           </div>
+          {pendingApproval ? (
+            <div className="choice-row">
+              <span className="hint">Allow this action?</span>
+              <button type="button" className="primary" onClick={() => void api.resolveToolApproval(pendingApproval, true)}>
+                Allow
+              </button>
+              <button type="button" className="secondary" onClick={() => void api.resolveToolApproval(pendingApproval, false)}>
+                Deny
+              </button>
+            </div>
+          ) : null}
           {error ? <p className="banner">{error}</p> : null}
         </form>
       </section>

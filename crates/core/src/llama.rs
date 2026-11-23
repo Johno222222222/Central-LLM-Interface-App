@@ -11,6 +11,8 @@ pub const VRAM_MARGIN_MIB: u32 = 2_048;
 pub struct LlamaLaunch {
     pub binary: PathBuf,
     pub models_dir: PathBuf,
+    /// When set, the server loads these GGUF paths in place, including extra folders.
+    pub preset: Option<PathBuf>,
     pub port: u16,
     pub context: u32,
     pub gpu_layers: u32,
@@ -18,13 +20,11 @@ pub struct LlamaLaunch {
 }
 
 pub fn llama_command_args(launch: &LlamaLaunch) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--host".into(),
         "127.0.0.1".into(),
         "--port".into(),
         launch.port.to_string(),
-        "--models-dir".into(),
-        launch.models_dir.display().to_string(),
         "--models-max".into(),
         "1".into(),
         "--models-memory-margin".into(),
@@ -33,7 +33,14 @@ pub fn llama_command_args(launch: &LlamaLaunch) -> Vec<String> {
         launch.gpu_layers.to_string(),
         "-c".into(),
         launch.context.to_string(),
-    ]
+    ];
+    if let Some(preset) = &launch.preset {
+        args.push("--models-preset".into());
+        args.push(preset.display().to_string());
+    }
+    args.push("--models-dir".into());
+    args.push(launch.models_dir.display().to_string());
+    args
 }
 
 pub fn bundled_origin(port: u16) -> String {
@@ -53,6 +60,9 @@ mod tests {
             models_dir: PathBuf::from(
                 r"C:\Users\Johno\AppData\Roaming\app.central-llm-interface\models",
             ),
+            preset: Some(PathBuf::from(
+                r"C:\Users\Johno\AppData\Roaming\app.central-llm-interface\models-preset.ini",
+            )),
             port: DEFAULT_PORT,
             context: 8192,
             gpu_layers: 99,
@@ -64,6 +74,7 @@ mod tests {
             .ends_with("llama-server.exe"));
         let args = llama_command_args(&launch);
         let joined = args.join(" ");
+        assert!(joined.contains("--models-preset"));
         assert!(joined.contains("--models-dir"));
         assert!(joined.contains(r"app.central-llm-interface\models"));
         assert!(!joined.to_lowercase().contains("comfyui"));

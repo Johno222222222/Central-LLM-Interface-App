@@ -504,6 +504,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   border-top: 1px solid var(--line);
 }
 
+.tools-menu { left: 8vw; right: auto; width: min(420px, calc(100% - 32px)); }
+.tool-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+.tool-row small { display: block; color: var(--muted); }
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--muted);
+}
+.dot.on { background: var(--ok); }
+.folder-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+
 .pending-file {
   display: inline-flex;
   align-items: center;

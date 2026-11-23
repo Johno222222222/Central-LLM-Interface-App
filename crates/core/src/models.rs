@@ -4,7 +4,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::gguf::read_gguf_meta;
-use crate::{CatalogModel, LoadedModel, ProviderId};
+use crate::{CatalogModel, CoreError, LoadedModel, ProviderId};
 
 pub fn family_from_filename(name: &str) -> String {
     let n = name.to_lowercase();
@@ -167,46 +167,211 @@ pub fn hosted_catalog() -> Vec<CatalogModel> {
             path: None,
             loaded: false,
             key_saved: false,
+            source_label: String::new(),
         })
         .collect()
 }
 
 pub fn scan_gguf_dir(dir: &Path) -> Vec<CatalogModel> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
+    scan_labeled(dir, "App folder", 4)
+}
+
+/// Scan the app folder and any extra folders in place. Files are not copied.
+/// Duplicate file names keep the app-folder id and prefix later copies with the folder name.
+pub fn scan_all_model_dirs(primary: &Path, extras: &[String]) -> Vec<CatalogModel> {
+    let mut models = scan_labeled(primary, "App folder", 4);
+    for extra in extras {
+        let path = Path::new(extra.trim());
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Extra folder");
+        models.extend(scan_labeled(path, label, 4));
+    }
+    dedupe_model_ids(&mut models);
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    models
+}
+
+fn scan_labeled(dir: &Path, label: &str, depth: u32) -> Vec<CatalogModel> {
     let mut models = Vec::new();
+    walk_gguf(dir, label, depth, &mut models);
+    models
+}
+
+fn walk_gguf(dir: &Path, label: &str, depth: u32, models: &mut Vec<CatalogModel>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_file() {
+        if path.is_dir() && depth > 0 {
+            walk_gguf(&path, label, depth - 1, models);
             continue;
         }
         let Some(name) = path.file_name().and_then(|item| item.to_str()) else {
             continue;
         };
-        if !name.to_lowercase().ends_with(".gguf") {
-            continue;
-        }
-        let lower = name.to_lowercase();
-        if lower.contains("mmproj") {
+        if !name.to_lowercase().ends_with(".gguf") || name.to_lowercase().contains("mmproj") {
             continue;
         }
         let meta = read_gguf_meta(&path);
-        let context_limit = meta.and_then(|item| item.context_length).unwrap_or(8_192);
         models.push(CatalogModel {
             id: name.to_string(),
             name: name.to_string(),
             provider: ProviderId::Local,
             family: family_from_filename(name),
-            context_limit,
+            context_limit: meta.and_then(|item| item.context_length).unwrap_or(8_192),
             installed: true,
             path: Some(path.display().to_string()),
             loaded: false,
             key_saved: true,
+            source_label: label.to_string(),
         });
     }
-    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    models
+}
+
+fn dedupe_model_ids(models: &mut [CatalogModel]) {
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    for model in models.iter_mut() {
+        let count = seen.entry(model.id.clone()).or_insert(0);
+        if *count > 0 {
+            let parent = model
+                .path
+                .as_deref()
+                .and_then(|path| Path::new(path).parent())
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("extra");
+            model.id = format!("{parent}/{}", model.id);
+            model.name = model.id.clone();
+        }
+        *count += 1;
+    }
+}
+
+/// llama-server preset so extra folders are loaded by absolute path, not copied.
+pub fn write_models_preset(
+    path: &Path,
+    models: &[CatalogModel],
+    context: u32,
+    gpu_layers: u32,
+) -> Result<(), CoreError> {
+    let mut text = format!("version = 1\n\n[*]\nn-gpu-layers = {gpu_layers}\nc = {context}\n\n");
+    for model in models
+        .iter()
+        .filter(|model| model.provider == ProviderId::Local)
+    {
+        let Some(file) = &model.path else {
+            continue;
+        };
+        text.push_str(&format!(
+            "[{}]\nmodel = {file}\n\n",
+            preset_section(&model.id)
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| CoreError::Message(error.to_string()))?;
+    }
+    fs::write(path, text).map_err(|error| CoreError::Message(error.to_string()))?;
+    Ok(())
+}
+
+fn preset_section(id: &str) -> String {
+    id.chars()
+        .map(|ch| {
+            if ch == ']' || ch == '\n' || ch == '\r' {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+/// Locally Uncensored's own GGUF folder, or a folder named in its config when that
+/// folder already contains a GGUF. Returns nothing when neither is present.
+pub fn detect_lu_model_folder(roaming_app_data: &Path) -> Option<String> {
+    let config = roaming_app_data
+        .join("locally-uncensored")
+        .join("config.json");
+    if let Ok(text) = fs::read_to_string(&config) {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(found) = find_configured_gguf_dir(&value) {
+                return Some(found);
+            }
+        }
+    }
+    let own = roaming_app_data.join("Locally Uncensored").join("models");
+    if directory_has_gguf(&own, 4) {
+        Some(own.display().to_string())
+    } else {
+        None
+    }
+}
+
+fn find_configured_gguf_dir(value: &Value) -> Option<String> {
+    let mut preferred = Vec::new();
+    let mut others = Vec::new();
+    collect_paths(value, "", &mut preferred, &mut others);
+    preferred
+        .into_iter()
+        .chain(others)
+        .find(|path| directory_has_gguf(Path::new(path), 4))
+}
+
+fn collect_paths(value: &Value, key: &str, preferred: &mut Vec<String>, others: &mut Vec<String>) {
+    match value {
+        Value::String(text) => {
+            if text.contains('\\') || text.contains('/') || text.contains(':') {
+                let interesting = key.to_ascii_lowercase();
+                if interesting.contains("model")
+                    || interesting.contains("engine")
+                    || interesting.contains("gguf")
+                    || interesting.contains("folder")
+                {
+                    preferred.push(text.clone());
+                } else {
+                    others.push(text.clone());
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_paths(item, key, preferred, others);
+            }
+        }
+        Value::Object(map) => {
+            for (child_key, child) in map {
+                collect_paths(child, child_key, preferred, others);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn directory_has_gguf(dir: &Path, depth: u32) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        {
+            return true;
+        }
+        if path.is_dir() && depth > 0 && directory_has_gguf(&path, depth - 1) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn select_model_ids(provider: ProviderId, mut ids: Vec<String>) -> Vec<String> {
@@ -253,6 +418,7 @@ pub fn catalog_from_ids(provider: ProviderId, ids: &[String]) -> Vec<CatalogMode
             path: None,
             loaded: false,
             key_saved: true,
+            source_label: String::new(),
             id: id.clone(),
         })
         .collect()
@@ -366,5 +532,49 @@ mod tests {
         let picked = select_model_ids(ProviderId::Openrouter, ids);
         assert_eq!(picked[0], "anthropic/claude-sonnet-4.5");
         assert!(picked.iter().any(|id| id.starts_with("openai/")));
+    }
+
+    #[test]
+    fn extra_folder_is_scanned_in_place_and_lu_config_is_found() {
+        let root = std::env::temp_dir().join(format!("cllm-folders-{}", uuid::Uuid::new_v4()));
+        let app = root.join("app-models");
+        let extra = root.join("other");
+        let lu = root.join("Roaming");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(extra.join("nested")).unwrap();
+        std::fs::create_dir_all(lu.join("Locally Uncensored").join("models")).unwrap();
+        std::fs::write(app.join("llama.gguf"), b"gguf").unwrap();
+        std::fs::write(extra.join("nested").join("qwen.gguf"), b"gguf").unwrap();
+        std::fs::write(
+            lu.join("Locally Uncensored")
+                .join("models")
+                .join("phi.gguf"),
+            b"gguf",
+        )
+        .unwrap();
+        let models = scan_all_model_dirs(&app, &[extra.display().to_string()]);
+        assert!(models
+            .iter()
+            .any(|model| model.id == "llama.gguf" && model.source_label == "App folder"));
+        assert!(models.iter().any(|model| model
+            .path
+            .as_deref()
+            .unwrap_or("")
+            .contains("qwen.gguf")));
+        let preset = root.join("preset.ini");
+        write_models_preset(&preset, &models, 8192, 99).unwrap();
+        let text = std::fs::read_to_string(&preset).unwrap();
+        assert!(text.contains("qwen.gguf"));
+        assert!(!text.to_lowercase().contains("comfyui"));
+        assert_eq!(
+            detect_lu_model_folder(&lu).as_deref(),
+            Some(
+                lu.join("Locally Uncensored")
+                    .join("models")
+                    .to_str()
+                    .unwrap()
+            )
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

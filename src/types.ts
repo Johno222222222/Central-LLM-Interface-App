@@ -22,6 +22,32 @@ export interface ChatSettings {
   voice: boolean;
   think: boolean;
   effort: Effort;
+  tools: ToolToggles;
+}
+
+export interface ToolToggles {
+  webSearch: boolean;
+  webFetch: boolean;
+  files: boolean;
+  shell: boolean;
+  screenshot: boolean;
+  mcp: boolean;
+}
+
+export interface ToolStep {
+  id: string;
+  name: string;
+  arguments: string;
+  result?: string;
+  status: string;
+}
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  enabled: boolean;
 }
 
 export interface AppSettings {
@@ -34,6 +60,9 @@ export interface AppSettings {
   appearance: Appearance;
   contextLength: number;
   gpuLayers: number;
+  extraModelDirs: string[];
+  approvedFolders: string[];
+  mcpServers: McpServerConfig[];
 }
 
 export interface Attachment {
@@ -51,6 +80,7 @@ export interface ChatMessage {
   createdAt: string;
   provider?: ProviderId;
   modelId?: string;
+  toolSteps: ToolStep[];
 }
 
 export interface ChatSummary {
@@ -79,6 +109,7 @@ export interface CatalogModel {
   path?: string | null;
   loaded: boolean;
   keySaved: boolean;
+  sourceLabel?: string;
 }
 
 export interface ProviderStatus {
@@ -148,5 +179,22 @@ export function defaultChatSettings(): ChatSettings {
     voice: false,
     think: false,
     effort: "default",
+    tools: {
+      webSearch: false,
+      webFetch: false,
+      files: false,
+      shell: false,
+      screenshot: false,
+      mcp: false,
+    },
   };
 }
+
+export const TOOL_TOGGLES: { key: keyof ToolToggles; label: string; hint: string }[] = [
+  { key: "webSearch", label: "Web search", hint: "Needs a Brave Search key" },
+  { key: "webFetch", label: "Web fetch", hint: "Public http and https pages" },
+  { key: "files", label: "Files", hint: "Read folders you approve" },
+  { key: "shell", label: "Shell", hint: "You approve each command" },
+  { key: "screenshot", label: "Screenshot", hint: "Capture the primary screen" },
+  { key: "mcp", label: "MCP", hint: "Servers from Settings" },
+];

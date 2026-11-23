@@ -1,4 +1,4 @@
-use central_llm_core::{require_hosted, CoreError, SecretStore};
+use central_llm_core::{require_account, require_hosted, CoreError, SecretStore};
 
 #[cfg_attr(not(windows), allow(dead_code))]
 const SERVICE: &str = "Central LLM Interface App";
@@ -22,6 +22,26 @@ impl SecretStore for KeychainStore {
     fn delete_key(&self, provider: &str) -> Result<(), CoreError> {
         let provider = require_hosted(provider)?;
         delete_secret(provider.slug())
+    }
+}
+
+impl KeychainStore {
+    pub fn set_account(&self, account: &str, secret: &str) -> Result<(), CoreError> {
+        require_account(account)?;
+        if secret.trim().is_empty() {
+            return Err(CoreError::Message("Enter a key before saving.".into()));
+        }
+        write_secret(account, secret)
+    }
+
+    pub fn get_account(&self, account: &str) -> Result<Option<String>, CoreError> {
+        require_account(account)?;
+        read_secret(account)
+    }
+
+    pub fn delete_account(&self, account: &str) -> Result<(), CoreError> {
+        require_account(account)?;
+        delete_secret(account)
     }
 }
 

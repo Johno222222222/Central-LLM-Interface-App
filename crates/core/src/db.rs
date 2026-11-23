@@ -76,6 +76,26 @@ impl Store {
             );
             ",
         )?;
+        self.ensure_column(
+            "settings",
+            "extra_model_dirs",
+            "extra_model_dirs TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        self.ensure_column(
+            "settings",
+            "approved_folders",
+            "approved_folders TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        self.ensure_column(
+            "settings",
+            "mcp_servers_json",
+            "mcp_servers_json TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        self.ensure_column(
+            "messages",
+            "tools_json",
+            "tools_json TEXT NOT NULL DEFAULT '[]'",
+        )?;
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?;
@@ -87,10 +107,13 @@ impl Store {
 
     pub fn get_settings(&self) -> Result<AppSettings, CoreError> {
         self.conn.query_row(
-            "SELECT llama_server_url, comfy_host, comfy_port, comfy_path, models_dir, output_dir, appearance, context_length, gpu_layers FROM settings WHERE id = 1",
+            "SELECT llama_server_url, comfy_host, comfy_port, comfy_path, models_dir, output_dir, appearance, context_length, gpu_layers, extra_model_dirs, approved_folders, mcp_servers_json FROM settings WHERE id = 1",
             [],
             |row| {
                 let appearance: String = row.get(6)?;
+                let extra: String = row.get(9)?;
+                let folders: String = row.get(10)?;
+                let mcp: String = row.get(11)?;
                 Ok(AppSettings {
                     llama_server_url: row.get(0)?,
                     comfy_host: row.get(1)?,
@@ -101,6 +124,9 @@ impl Store {
                     appearance: parse_appearance(&appearance),
                     context_length: row.get(7)?,
                     gpu_layers: row.get(8)?,
+                    extra_model_dirs: serde_json::from_str(&extra).unwrap_or_default(),
+                    approved_folders: serde_json::from_str(&folders).unwrap_or_default(),
+                    mcp_servers: serde_json::from_str(&mcp).unwrap_or_default(),
                 })
             },
         ).map_err(CoreError::from)
@@ -108,8 +134,8 @@ impl Store {
 
     pub fn save_settings(&self, settings: &AppSettings) -> Result<(), CoreError> {
         self.conn.execute(
-            "INSERT INTO settings (id, llama_server_url, comfy_host, comfy_port, comfy_path, models_dir, output_dir, appearance, context_length, gpu_layers)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO settings (id, llama_server_url, comfy_host, comfy_port, comfy_path, models_dir, output_dir, appearance, context_length, gpu_layers, extra_model_dirs, approved_folders, mcp_servers_json)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 llama_server_url = excluded.llama_server_url,
                 comfy_host = excluded.comfy_host,
@@ -119,7 +145,10 @@ impl Store {
                 output_dir = excluded.output_dir,
                 appearance = excluded.appearance,
                 context_length = excluded.context_length,
-                gpu_layers = excluded.gpu_layers",
+                gpu_layers = excluded.gpu_layers,
+                extra_model_dirs = excluded.extra_model_dirs,
+                approved_folders = excluded.approved_folders,
+                mcp_servers_json = excluded.mcp_servers_json",
             params![
                 settings.llama_server_url,
                 settings.comfy_host,
@@ -130,6 +159,9 @@ impl Store {
                 appearance_name(settings.appearance),
                 settings.context_length,
                 settings.gpu_layers,
+                serde_json::to_string(&settings.extra_model_dirs).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&settings.approved_folders).unwrap_or_else(|_| "[]".into()),
+                serde_json::to_string(&settings.mcp_servers).unwrap_or_else(|_| "[]".into()),
             ],
         )?;
         Ok(())
@@ -159,13 +191,14 @@ impl Store {
         let summary = self.chat_summary(id)?;
         let settings = self.chat_settings(id)?;
         let mut stmt = self.conn.prepare(
-            "SELECT id, role, content, thinking, attachments_json, created_at, provider, model_id
+            "SELECT id, role, content, thinking, attachments_json, created_at, provider, model_id, tools_json
              FROM messages WHERE chat_id = ?1 ORDER BY created_at ASC, rowid ASC",
         )?;
         let messages = stmt
             .query_map(params![id], |row| {
                 let attachments: String = row.get(4)?;
                 let provider: Option<String> = row.get(6)?;
+                let tools: String = row.get(8)?;
                 Ok(ChatMessage {
                     id: row.get(0)?,
                     role: row.get(1)?,
@@ -175,6 +208,7 @@ impl Store {
                     created_at: row.get(5)?,
                     provider: provider.as_deref().and_then(ProviderId::from_slug),
                     model_id: row.get(7)?,
+                    tool_steps: serde_json::from_str(&tools).unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -242,8 +276,8 @@ impl Store {
     pub fn insert_message(&self, chat_id: &str, message: &ChatMessage) -> Result<(), CoreError> {
         let attachments = serde_json::to_string(&message.attachments)?;
         self.conn.execute(
-            "INSERT INTO messages (id, chat_id, role, content, thinking, attachments_json, created_at, provider, model_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO messages (id, chat_id, role, content, thinking, attachments_json, created_at, provider, model_id, tools_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 message.id,
                 chat_id,
@@ -254,6 +288,7 @@ impl Store {
                 message.created_at,
                 message.provider.map(|provider| provider.slug().to_string()),
                 message.model_id,
+                serde_json::to_string(&message.tool_steps).unwrap_or_else(|_| "[]".into()),
             ],
         )?;
         Ok(())
@@ -268,6 +303,25 @@ impl Store {
         self.conn.execute(
             "UPDATE messages SET content = ?1, thinking = ?2 WHERE id = ?3",
             params![content, thinking, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_tool_steps(
+        &self,
+        id: &str,
+        content: &str,
+        thinking: Option<&str>,
+        tool_steps: &[crate::ToolStep],
+    ) -> Result<(), CoreError> {
+        self.conn.execute(
+            "UPDATE messages SET content = ?1, thinking = ?2, tools_json = ?3 WHERE id = ?4",
+            params![
+                content,
+                thinking,
+                serde_json::to_string(tool_steps).unwrap_or_else(|_| "[]".into()),
+                id
+            ],
         )?;
         Ok(())
     }
@@ -340,6 +394,22 @@ pub fn new_message(
         created_at: now_stamp(),
         provider,
         model_id,
+        tool_steps: Vec::new(),
+    }
+}
+
+impl Store {
+    fn ensure_column(&self, table: &str, column: &str, definition: &str) -> Result<(), CoreError> {
+        let mut stmt = self.conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for name in names {
+            if name? == column {
+                return Ok(());
+            }
+        }
+        self.conn
+            .execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])?;
+        Ok(())
     }
 }
 
