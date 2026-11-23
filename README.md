@@ -30,6 +30,8 @@ If you already run llama-server yourself, paste its URL under **Local runtime** 
 - Code and Voice are on the composer and stay off until a later version.
 - Chats are stored on this computer and are still there after a restart.
 - Appearance is dark by default. Light and system are in Settings.
+- Tools, from the composer: web search (Brave, your own key), web fetch, files in folders you approve, shell with a yes on each command, screenshot, and MCP servers from Settings. Shell and Files start off.
+- Extra GGUF folders in Settings, scanned in place. Import from Locally Uncensored fills in that app's model folder when it can find it.
 
 ## Run from source
 
@@ -71,4 +73,4 @@ CI on GitHub runs those checks and builds the Windows installer. It does not bui
 
 ## Not in this version
 
-Create and ComfyUI, the Hugging Face model browser, Benchmark, Voice, Code mode, chat plugins, and Mac or Linux builds. Those are later milestones in the spec.
+Create and ComfyUI, the Hugging Face model browser, Benchmark, Voice, Code mode, chat plugins, and Mac or Linux builds. Those are later milestones in the spec. App awareness (the model reading and, with a yes each time, changing this app's settings) comes soon after the tools menu. Looking around the desktop and then controlling the mouse and keyboard, still with a yes for each action, is one of the last steps.

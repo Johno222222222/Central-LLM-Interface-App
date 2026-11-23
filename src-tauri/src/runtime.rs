@@ -3,7 +3,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use central_llm_core::{
-    bundled_origin, llama_command_args, AppSettings, LlamaLaunch, DEFAULT_PORT, VRAM_MARGIN_MIB,
+    bundled_origin, llama_command_args, scan_all_model_dirs, write_models_preset, AppSettings,
+    LlamaLaunch, DEFAULT_PORT, VRAM_MARGIN_MIB,
 };
 use tauri::{AppHandle, Manager};
 
@@ -52,8 +53,11 @@ pub fn sync_runtime(
 ) -> Result<(), String> {
     let custom = normalize_origin(&settings.llama_server_url);
     let fingerprint = format!(
-        "{custom}|{}|{}|{}",
-        settings.models_dir, settings.context_length, settings.gpu_layers
+        "{custom}|{}|{}|{}|{}",
+        settings.models_dir,
+        settings.extra_model_dirs.join(";"),
+        settings.context_length,
+        settings.gpu_layers
     );
     if !custom.is_empty() {
         stop_child(&mut process.child);
@@ -90,9 +94,26 @@ pub fn sync_runtime(
 
     stop_child(&mut process.child);
     std::fs::create_dir_all(&settings.models_dir).map_err(|error| error.to_string())?;
+    let preset = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("models-preset.ini"));
+    if let Some(preset_path) = &preset {
+        let models =
+            scan_all_model_dirs(Path::new(&settings.models_dir), &settings.extra_model_dirs);
+        write_models_preset(
+            preset_path,
+            &models,
+            settings.context_length.max(512),
+            settings.gpu_layers,
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let launch = LlamaLaunch {
         binary: binary.clone(),
         models_dir: PathBuf::from(&settings.models_dir),
+        preset,
         port: DEFAULT_PORT,
         context: settings.context_length.max(512),
         gpu_layers: settings.gpu_layers,

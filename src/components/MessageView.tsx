@@ -15,6 +15,19 @@ export function MessageView({ message, streaming }: { message: ChatMessage; stre
         {!user && message.provider ? ` · ${providerLabel(message.provider)}` : ""}
       </div>
       <div className="bubble">
+        {message.toolSteps?.length ? (
+          <div className="tool-steps">
+            {message.toolSteps.map((step) => (
+              <details key={step.id} className="thinking" open={step.status === "running" || step.status === "approval"}>
+                <summary>
+                  {step.name} · {step.status}
+                </summary>
+                <pre className="code-block">{step.arguments}</pre>
+                {step.result ? <p>{step.result}</p> : null}
+              </details>
+            ))}
+          </div>
+        ) : null}
         {message.thinking ? (
           <details className="thinking" open={streaming}>
             <summary>Thinking</summary>

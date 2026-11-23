@@ -6,8 +6,18 @@ use crate::ProviderId;
 pub enum StreamPiece {
     Text(String),
     Thinking(String),
-    Usage { prompt: u32, completion: u32 },
+    Usage {
+        prompt: u32,
+        completion: u32,
+    },
     Error(String),
+    /// A fragment of a tool call. `id` and `name` arrive once; `arguments` may arrive in pieces.
+    ToolDelta {
+        index: u32,
+        id: String,
+        name: String,
+        arguments: String,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -89,6 +99,37 @@ fn pieces_from_openai(value: &Value) -> Vec<StreamPiece> {
                 }
             }
         }
+        if let Some(calls) = delta.get("tool_calls").and_then(|item| item.as_array()) {
+            for call in calls {
+                let index = call
+                    .get("index")
+                    .and_then(|item| item.as_u64())
+                    .unwrap_or(0) as u32;
+                let id = call
+                    .get("id")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = call
+                    .pointer("/function/name")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let arguments = call
+                    .pointer("/function/arguments")
+                    .and_then(|item| item.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !id.is_empty() || !name.is_empty() || !arguments.is_empty() {
+                    out.push(StreamPiece::ToolDelta {
+                        index,
+                        id,
+                        name,
+                        arguments,
+                    });
+                }
+            }
+        }
     }
     push_usage(
         &mut out,
@@ -111,6 +152,25 @@ fn pieces_from_anthropic(value: &Value) -> Vec<StreamPiece> {
                         }
                     }
                 }
+                Some("input_json_delta") => {
+                    let index = value
+                        .get("index")
+                        .and_then(|item| item.as_u64())
+                        .unwrap_or(0) as u32;
+                    let arguments = value
+                        .pointer("/delta/partial_json")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !arguments.is_empty() {
+                        out.push(StreamPiece::ToolDelta {
+                            index,
+                            id: String::new(),
+                            name: String::new(),
+                            arguments,
+                        });
+                    }
+                }
                 Some("thinking_delta") => {
                     if let Some(text) = value
                         .pointer("/delta/thinking")
@@ -122,6 +182,32 @@ fn pieces_from_anthropic(value: &Value) -> Vec<StreamPiece> {
                     }
                 }
                 _ => {}
+            }
+        }
+        Some("content_block_start") => {
+            if value
+                .pointer("/content_block/type")
+                .and_then(|item| item.as_str())
+                == Some("tool_use")
+            {
+                let index = value
+                    .get("index")
+                    .and_then(|item| item.as_u64())
+                    .unwrap_or(0) as u32;
+                out.push(StreamPiece::ToolDelta {
+                    index,
+                    id: value
+                        .pointer("/content_block/id")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    name: value
+                        .pointer("/content_block/name")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    arguments: String::new(),
+                });
             }
         }
         Some("error") => {
@@ -156,6 +242,22 @@ fn pieces_from_gemini(value: &Value) -> Vec<StreamPiece> {
         .and_then(|item| item.as_array())
     {
         for part in parts {
+            if let Some(call) = part.get("functionCall") {
+                out.push(StreamPiece::ToolDelta {
+                    index: out.len() as u32,
+                    id: String::new(),
+                    name: call
+                        .get("name")
+                        .and_then(|item| item.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    arguments: call
+                        .get("args")
+                        .map(|item| item.to_string())
+                        .unwrap_or_default(),
+                });
+                continue;
+            }
             let Some(text) = part.get("text").and_then(|item| item.as_str()) else {
                 continue;
             };

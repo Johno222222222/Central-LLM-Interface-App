@@ -7,10 +7,10 @@ use base64::Engine;
 use central_llm_core::{
     catalog_from_ids, default_context_limit, default_origin, estimate_thread_tokens,
     friendly_http_error, hosted_catalog, loaded_ids, new_message, parse_model_ids,
-    parse_router_models, redact, scan_gguf_dir, stream_completion, test_provider, test_url,
+    parse_router_models, redact, scan_all_model_dirs, stream_completion, test_provider, test_url,
     title_from_message, AppSettings, Attachment, CatalogModel, Chat, ChatMessage, ChatSettings,
     ChatSummary, CompletionRequest, ImagePart, OutgoingMessage, ProviderId, ProviderStatus,
-    StreamPiece,
+    StreamPiece, ToolStep, BRAVE_SEARCH_ACCOUNT, MAX_TOOL_ROUNDS,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -20,6 +20,7 @@ use crate::keychain::KeychainStore;
 use crate::runtime::{
     self, apply_health, health_snapshot, probe_origin, sync_runtime, validate_origin,
 };
+use crate::tool_runtime::{collect_tools, run_tool};
 use crate::AppState;
 use central_llm_core::SecretStore;
 
@@ -212,7 +213,8 @@ pub async fn list_models(state: State<'_, AppState>) -> Result<Vec<CatalogModel>
     let settings = guard(&state.store)?
         .get_settings()
         .map_err(|error| error.to_string())?;
-    let mut local = scan_gguf_dir(Path::new(&settings.models_dir));
+    let mut local =
+        scan_all_model_dirs(Path::new(&settings.models_dir), &settings.extra_model_dirs);
     let origin = local_origin(&state).unwrap_or_default();
     if !origin.is_empty() {
         if let Ok(response) = state.client.get(format!("{origin}/models")).send().await {
@@ -469,17 +471,13 @@ pub async fn send_message(
                 images.push(image);
             }
         }
-        outgoing.push(OutgoingMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-            images,
-        });
+        let mut item = OutgoingMessage::text(message.role.clone(), message.content.clone());
+        item.images = images;
+        outgoing.push(item);
     }
-    outgoing.push(OutgoingMessage {
-        role: "user".into(),
-        content: content.clone(),
-        images: user_images,
-    });
+    let mut user_turn = OutgoingMessage::text("user", content.clone());
+    user_turn.images = user_images;
+    outgoing.push(user_turn);
 
     let user = new_message("user", &content, user_files, None, None);
     let assistant = new_message(
@@ -529,6 +527,7 @@ pub async fn send_message(
         messages: outgoing,
         settings: chat.settings.clone(),
         origin,
+        tools: Vec::new(),
     };
     let client = state.client.clone();
     let chat_id = chat.id.clone();
@@ -568,7 +567,7 @@ fn title_from_message_if_needed(chat: &Chat, content: &str) -> String {
 async fn run_stream(
     app: AppHandle,
     client: reqwest::Client,
-    request: CompletionRequest,
+    mut request: CompletionRequest,
     key: String,
     flag: Arc<AtomicBool>,
     chat_id: String,
@@ -577,69 +576,141 @@ async fn run_stream(
     limit: u32,
     prior_tokens: u32,
 ) {
-    let mut text = String::new();
-    let mut thinking = String::new();
-    let mut last_save = Instant::now();
-    let save_app = app.clone();
-    let save_id = assistant_id.clone();
-    let result = stream_completion(&client, &request, &key, &flag, |piece| {
-        match piece {
-            StreamPiece::Text(chunk) => {
-                text.push_str(chunk);
-                let _ = app.emit(
-                    "chat-delta",
-                    ChatDelta {
-                        chat_id: chat_id.clone(),
-                        message_id: assistant_id.clone(),
-                        text: chunk.clone(),
-                        thinking: String::new(),
-                    },
-                );
-            }
-            StreamPiece::Thinking(chunk) => {
-                thinking.push_str(chunk);
-                let _ = app.emit(
-                    "chat-delta",
-                    ChatDelta {
-                        chat_id: chat_id.clone(),
-                        message_id: assistant_id.clone(),
-                        text: String::new(),
-                        thinking: chunk.clone(),
-                    },
-                );
-            }
-            StreamPiece::Usage { .. } | StreamPiece::Error(_) => {}
-        }
-        if last_save.elapsed() > Duration::from_millis(700) {
-            persist_partial(&save_app, &save_id, &text, &thinking);
-            last_save = Instant::now();
-        }
-    })
-    .await;
-
-    let state = app.state::<AppState>();
-    let (final_text, final_thinking, error, cancelled, used) = match result {
-        Ok(outcome) => {
-            let used = outcome.prompt_tokens.unwrap_or(prior_tokens);
-            (
-                outcome.text,
-                outcome.thinking,
-                outcome.error,
-                outcome.cancelled,
-                used,
-            )
-        }
-        Err(error) => (
-            String::new(),
-            String::new(),
-            Some(error.to_string()),
-            false,
-            prior_tokens,
-        ),
+    let settings = app
+        .state::<AppState>()
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.get_settings().ok());
+    let Some(settings) = settings else {
+        return;
     };
-    let locked = state.store.lock();
-    if let Ok(store) = locked {
-        let _ = store.update_message(
+    request.tools = collect_tools(&request.settings.tools, &settings);
+    let mut steps: Vec<ToolStep> = Vec::new();
+    let mut final_text = String::new();
+    let mut final_thinking = String::new();
+    let mut error = None;
+    let mut cancelled = false;
+    let mut used = prior_tokens;
+
+    for _ in 0..MAX_TOOL_ROUNDS {
+        if flag.load(Ordering::Relaxed) {
+            cancelled = true;
+            break;
+        }
+        let mut text = String::new();
+        let mut thinking = String::new();
+        let mut last_save = Instant::now();
+        let save_app = app.clone();
+        let save_id = assistant_id.clone();
+        let chat_for_delta = chat_id.clone();
+        let message_for_delta = assistant_id.clone();
+        let result = stream_completion(&client, &request, &key, &flag, |piece| {
+            match piece {
+                StreamPiece::Text(chunk) => {
+                    text.push_str(chunk);
+                    let _ = app.emit(
+                        "chat-delta",
+                        ChatDelta {
+                            chat_id: chat_for_delta.clone(),
+                            message_id: message_for_delta.clone(),
+                            text: chunk.clone(),
+                            thinking: String::new(),
+                        },
+                    );
+                }
+                StreamPiece::Thinking(chunk) => {
+                    thinking.push_str(chunk);
+                    let _ = app.emit(
+                        "chat-delta",
+                        ChatDelta {
+                            chat_id: chat_for_delta.clone(),
+                            message_id: message_for_delta.clone(),
+                            text: String::new(),
+                            thinking: chunk.clone(),
+                        },
+                    );
+                }
+                StreamPiece::Usage { .. }
+                | StreamPiece::Error(_)
+                | StreamPiece::ToolDelta { .. } => {}
+            }
+            if last_save.elapsed() > Duration::from_millis(700) {
+                persist_partial(&save_app, &save_id, &text, &thinking);
+                last_save = Instant::now();
+            }
+        })
+        .await;
+
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                error = Some(failure.to_string());
+                break;
+            }
+        };
+        final_text = outcome.text;
+        final_thinking = outcome.thinking;
+        cancelled = outcome.cancelled;
+        if let Some(prompt) = outcome.prompt_tokens {
+            used = prompt;
+        }
+        if outcome.tool_calls.is_empty() || cancelled {
+            break;
+        }
+        let mut assistant_turn = OutgoingMessage::text("assistant", final_text.clone());
+        assistant_turn.tool_calls = outcome.tool_calls.clone();
+        request.messages.push(assistant_turn);
+        for call in outcome.tool_calls {
+            let mut step = ToolStep {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                result: None,
+                status: "running".into(),
+            };
+            if central_llm_core::needs_command_approval(&call.name) {
+                step.status = "approval".into();
+                emit_step(&app, &chat_id, &assistant_id, &step);
+                let approved = wait_approval(&app, &call.id).await;
+                if !approved {
+                    step.status = "denied".into();
+                    step.result = Some("You denied this.".into());
+                    steps.push(step.clone());
+                    emit_step(&app, &chat_id, &assistant_id, &step);
+                    let mut denied = OutgoingMessage::text("tool", "The user denied this action.");
+                    denied.tool_call_id = Some(call.id);
+                    denied.tool_name = Some(call.name);
+                    request.messages.push(denied);
+                    continue;
+                }
+            }
+            let result_text = run_tool(&app, &call.name, &call.arguments, &settings).await;
+            step.status = "done".into();
+            step.result = Some(result_text.clone());
+            steps.push(step.clone());
+            emit_step(&app, &chat_id, &assistant_id, &step);
+            let mut tool_message = OutgoingMessage::text("tool", result_text);
+            tool_message.tool_call_id = Some(call.id);
+            tool_message.tool_name = Some(call.name.clone());
+            request.messages.push(tool_message);
+        }
+        if let Ok(store) = app.state::<AppState>().store.lock() {
+            let _ = store.save_tool_steps(
+                &assistant_id,
+                &final_text,
+                if final_thinking.is_empty() {
+                    None
+                } else {
+                    Some(final_thinking.as_str())
+                },
+                &steps,
+            );
+        }
+    }
+
+    if let Ok(store) = app.state::<AppState>().store.lock() {
+        let _ = store.save_tool_steps(
             &assistant_id,
             &final_text,
             if final_thinking.is_empty() {
@@ -647,6 +718,7 @@ async fn run_stream(
             } else {
                 Some(final_thinking.as_str())
             },
+            &steps,
         );
         let _ = store.touch_chat(&chat_id, Some(&title), used, limit);
     }
@@ -666,6 +738,29 @@ async fn run_stream(
     );
 }
 
+fn emit_step(app: &AppHandle, chat_id: &str, message_id: &str, step: &ToolStep) {
+    let _ = app.emit(
+        "tool-step",
+        serde_json::json!({
+            "chatId": chat_id,
+            "messageId": message_id,
+            "step": step,
+        }),
+    );
+}
+
+async fn wait_approval(app: &AppHandle, call_id: &str) -> bool {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    if let Ok(mut approvals) = app.state::<AppState>().approvals.lock() {
+        approvals.insert(call_id.to_string(), sender);
+    }
+    let _ = app.emit("tool-approval", serde_json::json!({ "callId": call_id }));
+    matches!(
+        tokio::time::timeout(Duration::from_secs(180), receiver).await,
+        Ok(Ok(true))
+    )
+}
+
 fn persist_partial(app: &AppHandle, message_id: &str, text: &str, thinking: &str) {
     let state = app.state::<AppState>();
     let locked = state.store.lock();
@@ -679,6 +774,77 @@ fn persist_partial(app: &AppHandle, message_id: &str, text: &str, thinking: &str
                 Some(thinking)
             },
         );
+    }
+}
+
+#[tauri::command]
+pub fn resolve_tool_approval(
+    state: State<AppState>,
+    call_id: String,
+    approved: bool,
+) -> Result<(), String> {
+    if let Some(sender) = guard(&state.approvals)?.remove(&call_id) {
+        let _ = sender.send(approved);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn detect_lu_folder() -> Result<Option<String>, String> {
+    let roaming = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs_fallback());
+    let Some(roaming) = roaming else {
+        return Ok(None);
+    };
+    Ok(central_llm_core::detect_lu_model_folder(&roaming))
+}
+
+fn dirs_fallback() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| {
+        std::path::PathBuf::from(home)
+            .join("AppData")
+            .join("Roaming")
+    })
+}
+
+#[tauri::command]
+pub fn web_search_status() -> Result<bool, String> {
+    Ok(KeychainStore
+        .get_account(BRAVE_SEARCH_ACCOUNT)
+        .map(|value| value.is_some())
+        .unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn save_web_search_key(secret: String) -> Result<(), String> {
+    KeychainStore
+        .set_account(BRAVE_SEARCH_ACCOUNT, &secret)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn clear_web_search_key() -> Result<(), String> {
+    KeychainStore
+        .delete_account(BRAVE_SEARCH_ACCOUNT)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn test_web_search(app: AppHandle) -> Result<String, String> {
+    let settings = guard(&app.state::<AppState>().store)?
+        .get_settings()
+        .map_err(|error| error.to_string())?;
+    let answer =
+        crate::tool_runtime::run_tool(&app, "web_search", r#"{"query":"llama.cpp"}"#, &settings)
+            .await;
+    if answer.starts_with("Add a Brave")
+        || answer.starts_with("Web search returned HTTP")
+        || answer.starts_with("Web search could not")
+    {
+        Err(answer)
+    } else {
+        Ok("Brave Search answered.".into())
     }
 }
 

@@ -317,6 +317,42 @@ Each slice below is meant to be one cloud-agent run. Stop when that slice's acce
 
 **0.1.5 Simple Windows installer.** Ship a standard Windows installer (the Tauri bundle) that installs the app, the bundled llama-server, a Start menu shortcut, and an uninstaller. CI publishes that Windows artifact only. Done when Johno can install from one Windows download without building from source or unpacking a zip.
 
+### v0.1.1 Tools and extra model folders
+
+Two additions after the first installer, in one step.
+
+**Tools.** The composer has a Tools menu, modeled on Locally Uncensored: one dropdown, a toggle and a status dot per tool. The first set is Web search, Web fetch, Files, Shell, Screenshot, and MCP.
+
+- Web search uses Brave Search and the user's own key, saved in the OS keychain and set in Settings. The free Brave plan is enough to try it.
+- Web fetch reads a public http or https page. Private and local addresses are refused.
+- Files lists and reads only inside folders the user approved in Settings. It cannot write. The toggle starts off.
+- Shell runs one command and asks for approval of that exact command before it runs. The toggle starts off.
+- Screenshot captures the primary screen on Windows.
+- MCP starts servers configured in Settings and exposes their tools in the same menu.
+
+Providers that support tools get real tool calls: OpenAI-compatible APIs including OpenRouter and DeepSeek, Anthropic, Gemini, and llama-server when the model supports tools. Each call and its result shows in the thread as a collapsible step.
+
+The tool list is a registry (`crates/core/src/tools.rs`). A new tool is a spec plus one handler in the desktop shell. How to add one is in `docs/TOOLS.md`. The registry already names the approval rule for later tools so they drop in without a new permission system:
+
+- `update_settings` asks for approval of each change.
+- `desktop_click`, `desktop_type`, and `desktop_key` ask for approval of each action.
+
+Those names are reserved. They are not implemented in v0.1.1.
+
+**Extra model folders.** Settings can add more GGUF folders. The app scans them next to its own models folder and does not copy the files. An Import from Locally Uncensored action looks for `%APPDATA%\Locally Uncensored\models`, and for a GGUF folder named in `%APPDATA%\locally-uncensored\config.json`. If neither is there, the user browses to the folder. Models from those folders show up in the chat picker and load through the bundled llama-server by absolute path. Moving them into the app folder is a later step, so extra folders stay a separate list from the app's own models folder.
+
+### Soon after v0.1.1: app awareness
+
+Chat models can read this app's own state and, with a yes on each change, update settings.
+
+Read-only tools cover settings, installed models, imported workflows, and chats. They use the same registry as v0.1.1 and do not need an approval prompt to look. A change, such as turning a tool on, pointing at another models folder, or editing a provider, goes through `update_settings` and waits for the user to approve that specific change. The model sees the refusal if the user says no. Nothing here writes keys, deletes models, or starts a ComfyUI run.
+
+### Near the end: desktop look-around and control
+
+After the creative tools and the model browser exist, the model can look at the desktop and then act on it.
+
+Looking is the screenshot tool from v0.1.1, used on purpose so the model can see the screen before it asks to do something. Control is mouse and keyboard: `desktop_click`, `desktop_type`, and `desktop_key`. Each of those waits for approval of that one action, using the approval hook the registry already has. There is no mode that clicks or types without a yes. This stays one of the last steps, with Benchmark, voice, and the Mac and Linux builds.
+
 ### v0.2 Create
 
 **0.2.1 ComfyUI connection.** Settings for host, port, and optional install path, plus a health check. No git-pull or Update ComfyUI action. Done when the app shows connected if Desktop is running, and a clear error if it is not.
@@ -344,6 +380,8 @@ Each slice below is meant to be one cloud-agent run. Stop when that slice's acce
 - Think, reasoning effort, Phone, and Small-Model.
 - Built-in Create recipes, once import is reliable: Image tools, Video and 3D Generate modes (text, image, and multiview), plus Animate, Extend, and the rest of the agreed sub-options.
 - Optional Ollama backend.
+- App awareness: read settings, installed models, workflows, and chats, and change settings only with approval of each change.
+- Desktop look-around and control: screenshots first, then mouse and keyboard with approval of each action.
 - macOS and Linux, as one of the very last steps, not right after v0.1.
 
 ## Decisions

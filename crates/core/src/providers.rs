@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 
 use crate::sse::{SseBuffer, StreamPiece};
-use crate::{ChatSettings, CoreError, ProviderId};
+use crate::{ChatSettings, CoreError, ProviderId, ToolSpec};
 
 #[derive(Debug, Clone)]
 pub struct ImagePart {
@@ -13,11 +13,35 @@ pub struct ImagePart {
     pub data_base64: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub index: u32,
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct OutgoingMessage {
     pub role: String,
     pub content: String,
     pub images: Vec<ImagePart>,
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+}
+
+impl OutgoingMessage {
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            images: Vec::new(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +52,7 @@ pub struct CompletionRequest {
     pub settings: ChatSettings,
     /// Scheme and host, no path. Example: `https://api.openai.com`.
     pub origin: String,
+    pub tools: Vec<ToolSpec>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +63,7 @@ pub struct StreamOutcome {
     pub completion_tokens: Option<u32>,
     pub cancelled: bool,
     pub error: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 pub fn default_origin(provider: ProviderId) -> &'static str {
@@ -135,10 +161,14 @@ fn openai_body(request: &CompletionRequest) -> Value {
     } else if request.settings.think {
         body["reasoning_effort"] = json!(request.settings.effort.api_value());
     }
+    if !request.tools.is_empty() {
+        body["tools"] = crate::openai_tools(&request.tools);
+        body["tool_choice"] = json!("auto");
+    }
     merge_custom(
         &mut body,
         &request.settings,
-        &["model", "messages", "stream"],
+        &["model", "messages", "stream", "tools"],
     );
     body
 }
@@ -169,8 +199,17 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
                 }
             }));
         }
-        if !message.content.is_empty() || content.is_empty() {
+        if !message.content.is_empty() || (content.is_empty() && message.tool_calls.is_empty()) {
             content.push(json!({"type": "text", "text": message.content}));
+        }
+        for call in &message.tool_calls {
+            let input = serde_json::from_str::<Value>(&call.arguments).unwrap_or(json!({}));
+            content.push(json!({
+                "type": "tool_use",
+                "id": call.id,
+                "name": call.name,
+                "input": input,
+            }));
         }
         if let Some(last) = messages.last_mut() {
             if last.get("role").and_then(|item| item.as_str()) == Some(role) {
@@ -207,10 +246,13 @@ fn anthropic_body(request: &CompletionRequest) -> Value {
             "budget_tokens": budget.unwrap_or_else(|| request.settings.effort.anthropic_budget()),
         });
     }
+    if !request.tools.is_empty() {
+        body["tools"] = crate::anthropic_tools(&request.tools);
+    }
     merge_custom(
         &mut body,
         &request.settings,
-        &["model", "messages", "stream", "system"],
+        &["model", "messages", "stream", "system", "tools"],
     );
     body
 }
@@ -219,6 +261,18 @@ fn gemini_body(request: &CompletionRequest) -> Value {
     let mut contents = Vec::new();
     let mut system = Vec::new();
     for message in &request.messages {
+        if message.role == "tool" {
+            contents.push(json!({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": message.tool_name.clone().unwrap_or_else(|| "tool".into()),
+                        "response": {"result": message.content}
+                    }
+                }]
+            }));
+            continue;
+        }
         if message.role == "system" {
             if !message.content.is_empty() {
                 system.push(message.content.clone());
@@ -231,6 +285,10 @@ fn gemini_body(request: &CompletionRequest) -> Value {
             "user"
         };
         let mut parts = Vec::new();
+        for call in &message.tool_calls {
+            let args = serde_json::from_str::<Value>(&call.arguments).unwrap_or(json!({}));
+            parts.push(json!({"functionCall": {"name": call.name, "args": args}}));
+        }
         if !message.content.is_empty() {
             parts.push(json!({"text": message.content}));
         }
@@ -276,6 +334,9 @@ fn gemini_body(request: &CompletionRequest) -> Value {
             "parts": [{"text": system.join("\n\n")}]
         });
     }
+    if !request.tools.is_empty() {
+        body["tools"] = crate::gemini_tools(&request.tools);
+    }
     body
 }
 
@@ -299,6 +360,24 @@ fn openai_messages(messages: &[OutgoingMessage]) -> Value {
     let items = messages
         .iter()
         .map(|message| {
+            if message.role == "tool" {
+                return json!({
+                    "role": "tool",
+                    "tool_call_id": message.tool_call_id.clone().unwrap_or_default(),
+                    "content": message.content,
+                });
+            }
+            if !message.tool_calls.is_empty() {
+                return json!({
+                    "role": "assistant",
+                    "content": message.content,
+                    "tool_calls": message.tool_calls.iter().map(|call| json!({
+                        "id": call.id,
+                        "type": "function",
+                        "function": {"name": call.name, "arguments": call.arguments}
+                    })).collect::<Vec<_>>()
+                });
+            }
             if message.images.is_empty() {
                 json!({
                     "role": message.role,
@@ -454,7 +533,7 @@ where
         on_piece(&piece);
         apply_piece(&mut outcome, piece);
     }
-    if outcome.text.is_empty() && outcome.thinking.is_empty() {
+    if outcome.text.is_empty() && outcome.thinking.is_empty() && outcome.tool_calls.is_empty() {
         if let Some(error) = outcome.error.clone() {
             return Err(CoreError::Message(error));
         }
@@ -471,6 +550,37 @@ fn apply_piece(outcome: &mut StreamOutcome, piece: StreamPiece) {
             outcome.completion_tokens = Some(completion);
         }
         StreamPiece::Error(message) => outcome.error = Some(message),
+        StreamPiece::ToolDelta {
+            index,
+            id,
+            name,
+            arguments,
+        } => {
+            if let Some(call) = outcome
+                .tool_calls
+                .iter_mut()
+                .find(|call| call.index == index)
+            {
+                if !id.is_empty() {
+                    call.id = id;
+                }
+                if !name.is_empty() {
+                    call.name = name;
+                }
+                call.arguments.push_str(&arguments);
+            } else {
+                outcome.tool_calls.push(ToolCall {
+                    index,
+                    id: if id.is_empty() {
+                        format!("call-{index}")
+                    } else {
+                        id
+                    },
+                    name,
+                    arguments,
+                });
+            }
+        }
     }
 }
 
@@ -526,13 +636,10 @@ mod tests {
         CompletionRequest {
             provider,
             model: "demo-model".into(),
-            messages: vec![OutgoingMessage {
-                role: "user".into(),
-                content: "Hello".into(),
-                images: Vec::new(),
-            }],
+            messages: vec![OutgoingMessage::text("user", "Hello")],
             settings,
             origin: "http://127.0.0.1:9".into(),
+            tools: Vec::new(),
         }
     }
 

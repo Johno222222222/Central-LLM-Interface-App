@@ -176,6 +176,11 @@ export function SettingsScreen() {
           </div>
         </section>
 
+        <ExtraFolders settings={settings} onChange={setSettings} onNotice={setNotice} />
+        <WebSearchCard />
+        <ApprovedFolders settings={settings} onChange={setSettings} />
+        <McpServers settings={settings} onChange={setSettings} />
+
         <section className="card">
           <h2>Providers and keys</h2>
           <p className="hint">A saved key can be tested. The key itself is never shown again and is not stored in a file.</p>
@@ -193,6 +198,257 @@ export function SettingsScreen() {
         {notice ? <p className="hint">{notice}</p> : null}
       </div>
     </main>
+  );
+}
+
+function ExtraFolders({
+  settings,
+  onChange,
+  onNotice,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+  onNotice: (notice: string) => void;
+}) {
+  async function addFolder() {
+    if (!isTauri()) {
+      onNotice("Choose extra model folders from the installed Windows app.");
+      return;
+    }
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false });
+    if (typeof picked !== "string") return;
+    const next = await api.saveSettings({
+      ...settings,
+      extraModelDirs: [...settings.extraModelDirs, picked],
+    });
+    onChange(next);
+    await api.restartRuntime();
+    onNotice("That folder will be scanned in place. Nothing is copied.");
+  }
+
+  async function importLu() {
+    const found = await api.detectLuFolder();
+    if (!found) {
+      onNotice("No Locally Uncensored model folder was found. Browse to it instead.");
+      return;
+    }
+    if (settings.extraModelDirs.includes(found)) {
+      onNotice("That Locally Uncensored folder is already added.");
+      return;
+    }
+    const next = await api.saveSettings({
+      ...settings,
+      extraModelDirs: [...settings.extraModelDirs, found],
+    });
+    onChange(next);
+    await api.restartRuntime();
+    onNotice(`Added ${found}. Models stay where they are.`);
+  }
+
+  async function remove(path: string) {
+    const next = await api.saveSettings({
+      ...settings,
+      extraModelDirs: settings.extraModelDirs.filter((item) => item !== path),
+    });
+    onChange(next);
+    await api.restartRuntime();
+  }
+
+  return (
+    <section className="card">
+      <h2>More model folders</h2>
+      <p className="hint">
+        GGUF files in these folders are read where they are. A later version can move them into this app&apos;s folder.
+      </p>
+      {settings.extraModelDirs.map((path) => (
+        <div key={path} className="folder-row">
+          <span>{path}</span>
+          <button type="button" className="secondary" onClick={() => void remove(path)}>
+            Remove
+          </button>
+        </div>
+      ))}
+      <div className="button-row">
+        <button type="button" className="secondary" onClick={() => void addFolder()}>
+          Add folder
+        </button>
+        <button type="button" className="secondary" onClick={() => void importLu()}>
+          Import from Locally Uncensored
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function WebSearchCard() {
+  const [draft, setDraft] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  useEffect(() => {
+    void api.webSearchStatus().then(setSaved).catch(() => setSaved(false));
+  }, []);
+  return (
+    <section className="card">
+      <h2>Web search</h2>
+      <p className="hint">
+        Brave Search, with your own key. The free plan is enough to try it. The key stays in Windows Credential Manager.
+      </p>
+      <p className={saved ? "status-ok" : "hint"}>{saved ? "Brave key saved" : "No Brave key saved"}</p>
+      <input
+        type="password"
+        autoComplete="off"
+        placeholder="Paste a Brave Search key"
+        aria-label="Brave Search API key"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      <div className="button-row">
+        <button
+          type="button"
+          className="secondary"
+          onClick={() =>
+            void api.saveWebSearchKey(draft).then(() => {
+              setDraft("");
+              setSaved(true);
+              setStatus("Saved in Windows Credential Manager.");
+            }).catch((reason: unknown) => setStatus(reason instanceof Error ? reason.message : "Could not save that key."))
+          }
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() =>
+            void api.testWebSearch().then(setStatus).catch((reason: unknown) => setStatus(reason instanceof Error ? reason.message : "Search failed."))
+          }
+        >
+          Test
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          disabled={!saved}
+          onClick={() => void api.clearWebSearchKey().then(() => { setSaved(false); setStatus("Key removed."); })}
+        >
+          Remove
+        </button>
+      </div>
+      {status ? <p className="hint">{status}</p> : null}
+    </section>
+  );
+}
+
+function ApprovedFolders({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}) {
+  async function addFolder() {
+    if (!isTauri()) return;
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const picked = await open({ directory: true, multiple: false });
+    if (typeof picked !== "string") return;
+    onChange(await api.saveSettings({ ...settings, approvedFolders: [...settings.approvedFolders, picked] }));
+  }
+  return (
+    <section className="card">
+      <h2>Folders the Files tool may read</h2>
+      <p className="hint">The Files tool stays off until you turn it on in a chat, and it can only read these folders.</p>
+      {settings.approvedFolders.map((path) => (
+        <div key={path} className="folder-row">
+          <span>{path}</span>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() =>
+              void api
+                .saveSettings({ ...settings, approvedFolders: settings.approvedFolders.filter((item) => item !== path) })
+                .then(onChange)
+            }
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <button type="button" className="secondary" onClick={() => void addFolder()}>
+        Approve a folder
+      </button>
+    </section>
+  );
+}
+
+function McpServers({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}) {
+  const [name, setName] = useState("");
+  const [command, setCommand] = useState("");
+  const [args, setArgs] = useState("");
+  async function addServer() {
+    if (!name.trim() || !command.trim()) return;
+    const next = await api.saveSettings({
+      ...settings,
+      mcpServers: [
+        ...settings.mcpServers,
+        {
+          id: crypto.randomUUID(),
+          name: name.trim(),
+          command: command.trim(),
+          args: args.split(" ").filter(Boolean),
+          enabled: true,
+        },
+      ],
+    });
+    onChange(next);
+    setName("");
+    setCommand("");
+    setArgs("");
+  }
+  return (
+    <section className="card">
+      <h2>MCP servers</h2>
+      <p className="hint">Turn MCP on in a chat to use tools from these local servers. Each server is a command the app starts.</p>
+      {settings.mcpServers.map((server) => (
+        <div key={server.id} className="folder-row">
+          <span>
+            {server.name} · {server.command} {server.args.join(" ")}
+          </span>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() =>
+              void api
+                .saveSettings({ ...settings, mcpServers: settings.mcpServers.filter((item) => item.id !== server.id) })
+                .then(onChange)
+            }
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <label className="field">
+        Name
+        <input value={name} onChange={(event) => setName(event.target.value)} />
+      </label>
+      <label className="field">
+        Command
+        <input value={command} onChange={(event) => setCommand(event.target.value)} placeholder="npx" />
+      </label>
+      <label className="field">
+        Arguments
+        <input value={args} onChange={(event) => setArgs(event.target.value)} placeholder="-y @modelcontextprotocol/server-filesystem" />
+      </label>
+      <button type="button" className="secondary" onClick={() => void addServer()}>
+        Add server
+      </button>
+    </section>
   );
 }
 

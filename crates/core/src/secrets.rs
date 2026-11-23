@@ -15,6 +15,14 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
+pub fn require_account(account: &str) -> Result<(), CoreError> {
+    if account == crate::BRAVE_SEARCH_ACCOUNT || require_hosted(account).is_ok() {
+        Ok(())
+    } else {
+        Err(CoreError::Message("Unknown secret.".into()))
+    }
+}
+
 pub fn require_hosted(slug: &str) -> Result<ProviderId, CoreError> {
     match ProviderId::from_slug(slug) {
         Some(id) if id.needs_key() => Ok(id),

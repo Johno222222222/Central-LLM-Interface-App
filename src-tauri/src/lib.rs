@@ -1,6 +1,7 @@
 mod commands;
 mod keychain;
 mod runtime;
+mod tool_runtime;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub struct AppState {
     pub llama: Mutex<runtime::LlamaProcess>,
     pub data_dir: PathBuf,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 pub fn run() {
@@ -46,6 +48,7 @@ pub fn run() {
                 llama: Mutex::new(runtime::LlamaProcess::new()),
                 data_dir: data,
                 cancels: Mutex::new(HashMap::new()),
+                approvals: Mutex::new(HashMap::new()),
             });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -98,6 +101,12 @@ pub fn run() {
             commands::stage_attachment,
             commands::send_message,
             commands::stop_generation,
+            commands::resolve_tool_approval,
+            commands::detect_lu_folder,
+            commands::web_search_status,
+            commands::save_web_search_key,
+            commands::clear_web_search_key,
+            commands::test_web_search,
         ])
         .run(tauri::generate_context!())
         .expect("Central LLM Interface App failed to start");

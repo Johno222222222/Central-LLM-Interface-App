@@ -16,6 +16,7 @@ import {
   type ProviderStatus,
   type RuntimeStatus,
   type SendStarted,
+  type ToolStep,
 } from "./types";
 
 export function isTauri(): boolean {
@@ -25,6 +26,8 @@ export function isTauri(): boolean {
 type Listener = {
   onDelta: (event: ChatDelta) => void;
   onDone: (event: ChatDone) => void;
+  onToolStep?: (event: { chatId: string; messageId: string; step: ToolStep }) => void;
+  onApproval?: (event: { callId: string }) => void;
 };
 
 const listeners = new Set<Listener>();
@@ -40,9 +43,18 @@ export async function subscribe(listener: Listener): Promise<() => void> {
   const unDone: UnlistenFn = await listen<ChatDone>("chat-done", (event) => {
     listener.onDone(event.payload);
   });
+  const unStep: UnlistenFn = await listen<{ chatId: string; messageId: string; step: ToolStep }>(
+    "tool-step",
+    (event) => listener.onToolStep?.(event.payload),
+  );
+  const unApproval: UnlistenFn = await listen<{ callId: string }>("tool-approval", (event) => {
+    listener.onApproval?.(event.payload);
+  });
   return () => {
     unDelta();
     unDone();
+    unStep();
+    unApproval();
   };
 }
 
@@ -68,6 +80,12 @@ export const api = {
   stageAttachment,
   sendMessage,
   stopGeneration,
+  resolveToolApproval,
+  detectLuFolder,
+  webSearchStatus,
+  saveWebSearchKey,
+  clearWebSearchKey,
+  testWebSearch,
 };
 
 async function getSettings(): Promise<AppSettings> {
@@ -232,6 +250,46 @@ async function sendMessage(
   return invoke("send_message", { chatId, content, attachmentPaths });
 }
 
+async function resolveToolApproval(callId: string, approved: boolean): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("resolve_tool_approval", { callId, approved });
+}
+
+async function detectLuFolder(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke("detect_lu_folder");
+}
+
+async function webSearchStatus(): Promise<boolean> {
+  if (!isTauri()) return preview.webSearch;
+  return invoke("web_search_status");
+}
+
+async function saveWebSearchKey(secret: string): Promise<void> {
+  if (!isTauri()) {
+    if (!secret.trim()) throw new Error("Enter a key before saving.");
+    preview.webSearch = true;
+    return;
+  }
+  await invoke("save_web_search_key", { secret });
+}
+
+async function clearWebSearchKey(): Promise<void> {
+  if (!isTauri()) {
+    preview.webSearch = false;
+    return;
+  }
+  await invoke("clear_web_search_key");
+}
+
+async function testWebSearch(): Promise<string> {
+  if (!isTauri()) {
+    if (!preview.webSearch) throw new Error("Add a Brave Search key in Settings first.");
+    return "Brave Search answered.";
+  }
+  return invoke("test_web_search");
+}
+
 async function stopGeneration(chatId: string): Promise<void> {
   if (!isTauri()) {
     const timer = preview.timers.get(chatId);
@@ -325,6 +383,7 @@ function message(role: string, content: string, attachments: Attachment[]): Chat
     content,
     attachments,
     createdAt: new Date().toISOString(),
+    toolSteps: [],
   };
 }
 
@@ -351,6 +410,9 @@ const preview = {
     appearance: "dark",
     contextLength: 8192,
     gpuLayers: 99,
+    extraModelDirs: [],
+    approvedFolders: [],
+    mcpServers: [],
   } as AppSettings,
   runtime: {
     mode: "bundled",
@@ -369,6 +431,7 @@ const preview = {
     { provider: "openrouter", saved: false },
   ] as ProviderStatus[],
   keys: new Map<ProviderId, string>(),
+  webSearch: false,
   models: [
     {
       id: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
@@ -416,6 +479,7 @@ const preview = {
           content: "Where does a local reply come from, and where do API keys live?",
           attachments: [],
           createdAt: "2026-11-23T12:03:00.000Z",
+          toolSteps: [],
         },
         {
           id: "preview-assistant",
@@ -425,6 +489,7 @@ const preview = {
           createdAt: "2026-11-23T12:04:00.000Z",
           provider: "local",
           modelId: "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+          toolSteps: [],
         },
       ],
     },
