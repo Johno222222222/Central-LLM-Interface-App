@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
-import { api, isTauri } from "../api";
+import { api, isTauri, onSettingsChanged } from "../api";
 import { applyTheme } from "../theme";
 import { PROVIDERS, type AppSettings, type Appearance, type CatalogModel, type ProviderId, type ProviderStatus, type RuntimeStatus } from "../types";
 import { contextSteps } from "../components/MessageView";
 import { formatTokens } from "../lib/chatText";
 
-export function SettingsScreen() {
+export function SettingsScreen({ focus = "" }: { focus?: string }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
@@ -29,7 +29,24 @@ export function SettingsScreen() {
       setGpuLayers(nextSettings.gpuLayers);
       applyTheme(nextSettings.appearance);
     })();
+    let stop = () => {};
+    void onSettingsChanged(() => {
+      void api.getSettings().then((next) => {
+        setSettings(next);
+        setUrl(next.llamaServerUrl);
+        setContextLength(next.contextLength);
+        setGpuLayers(next.gpuLayers);
+        applyTheme(next.appearance);
+      });
+    }).then((unlisten) => {
+      stop = unlisten;
+    });
+    return () => stop();
   }, []);
+  useEffect(() => {
+    if (!focus) return;
+    document.querySelector(`[data-setting="${focus}"]`)?.scrollIntoView({ block: "center" });
+  }, [focus]);
 
   if (!settings) {
     return (
@@ -96,7 +113,7 @@ export function SettingsScreen() {
           Keys stay in Windows Credential Manager. Chat models live in this app&apos;s folder, not in ComfyUI.
         </p>
 
-        <section className="card">
+        <section className="card" data-setting="appearance">
           <h2>Appearance</h2>
           <div className="choice-row">
             {(["dark", "light", "system"] as Appearance[]).map((appearance) => (
@@ -112,7 +129,7 @@ export function SettingsScreen() {
           </div>
         </section>
 
-        <section className="card">
+        <section className="card" data-setting="contextLength">
           <h2>Local runtime</h2>
           <p className={runtime?.running ? "status-ok" : "muted"}>{runtime?.detail}</p>
           <p className="hint">
@@ -164,7 +181,7 @@ export function SettingsScreen() {
           </div>
         </section>
 
-        <section className="card">
+        <section className="card" data-setting="modelsDir">
           <h2>Models folder</h2>
           <p>{settings.modelsDir}</p>
           <p className="hint">Put GGUF chat models here. This is separate from the ComfyUI models folder.</p>
@@ -328,7 +345,7 @@ function ExtraFolders({
   }
 
   return (
-    <section className="card">
+    <section className="card" data-setting="extraModelDirs">
       <h2>More model folders</h2>
       <p className="hint">
         GGUF files in these folders are read where they are. A later version can move them into this app&apos;s folder.

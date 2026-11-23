@@ -3,6 +3,7 @@
 //! The Tauri shell calls into this crate. API keys never pass through the
 //! database types defined here; callers keep them in the OS keychain.
 
+mod app_awareness;
 mod db;
 mod gguf;
 mod llama;
@@ -14,6 +15,10 @@ mod tokens;
 mod tools;
 mod types;
 
+pub use app_awareness::{
+    open_tab_name, propose_setting, provider_key_line, quant_label, setting_is_forbidden,
+    settings_report, SettingProposal, SettingSnapshot, SettingValue,
+};
 pub use db::{new_message, now_stamp, Store};
 pub use gguf::{read_gguf_meta, GgufMeta};
 pub use llama::{bundled_origin, llama_command_args, LlamaLaunch, DEFAULT_PORT, VRAM_MARGIN_MIB};

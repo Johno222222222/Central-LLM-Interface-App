@@ -30,13 +30,18 @@ Leave the tool off by default when it can read private files or run a command.
 - File listings returned to the model are capped at 60 names and 4,000 characters. File reads are capped at 8,000 characters.
 - When any tool is enabled, the request starts with a short system note that lists the approved folders. The model is told not to invent paths outside that list.
 
+## App tools
+
+The App toggle (on by default) exposes `get_app_state`, `list_settings`, `list_models`, `list_threads`, `get_server_status`, `update_settings`, and `open_tab`.
+
+Reads return plain text and do not ask. `list_settings` reports each provider key as set or not set. `update_settings` is in `approval_for`, so every change waits for Approve or Deny and shows the old and new value. The whitelist lives in `crates/core/src/app_awareness.rs`. It refuses API keys, approved folders, shell approval mode, and any attempt to turn Shell or Files on.
+
 ## Reserved names
 
 These names are already in `approval_for` and are not built yet. Use them when their milestone arrives so the approval behavior stays the same.
 
 | Name | Milestone | Behavior |
 | --- | --- | --- |
-| `update_settings` | App awareness, soon after v0.1.1 | One approval for each settings change. Read-only tools for settings, models, workflows, and chats do not use this name and do not ask. |
 | `desktop_click`, `desktop_type`, `desktop_key` | Desktop control, near the end | One approval for each pointer or keyboard action. Screenshot stays the separate look-around tool from v0.1.1. |
 
 ## MCP

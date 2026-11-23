@@ -287,6 +287,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   padding: 4px 6px;
 }
 .thumb-row { display: flex; gap: 6px; }
+.approval-card {
+  margin: 8px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-elev);
+}
+.approval-card p { margin: 6px 0; }
 .ctx-slider { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .ctx-slider input { width: 96px; }
 

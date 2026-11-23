@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { api } from "../api";
 import { providerLabel } from "../lib/chatText";
 import type { CatalogModel, ChatMessage } from "../types";
 
@@ -159,7 +160,22 @@ export function MessageView({
                 <summary>
                   {step.name} · {step.status}
                 </summary>
-                <pre className="code-block">{step.arguments}</pre>
+                {step.name === "update_settings" && step.status === "approval" ? (
+                  <div className="approval-card">
+                    <strong>Change setting</strong>
+                    <p>{step.arguments}</p>
+                    <div className="choice-row">
+                      <button type="button" className="primary" onClick={() => void api.resolveToolApproval(step.id, true)}>
+                        Approve
+                      </button>
+                      <button type="button" className="secondary" onClick={() => void api.resolveToolApproval(step.id, false)}>
+                        Deny
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <pre className="code-block">{step.arguments}</pre>
+                )}
                 {step.result ? <p>{step.result}</p> : null}
               </details>
             ))}

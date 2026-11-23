@@ -46,7 +46,7 @@ export function ToolsMenu({
               </label>
             );
           })}
-          <p className="hint">Shell asks before every command. Files only read folders you approve in Settings.</p>
+          <p className="hint">App can look at this app. A settings change asks first. Shell asks before every command. Files only read folders you approve in Settings.</p>
           <button type="button" className="secondary" onClick={() => setOpen(false)}>
             Close
           </button>

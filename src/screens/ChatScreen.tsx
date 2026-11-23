@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
-import { api, isTauri, subscribe } from "../api";
+import { api, isTauri, onSettingsChanged, subscribe } from "../api";
 import { contextSteps, MessageView } from "../components/MessageView";
 import { ToolsMenu } from "../components/ToolsMenu";
 import { ModelPicker } from "../components/ModelPicker";
@@ -87,6 +87,18 @@ export function ChatScreen() {
       stop();
     };
   }, []);
+
+  useEffect(() => {
+    let stop = () => {};
+    void onSettingsChanged(() => {
+      if (!chatId) return;
+      void api.getChat(chatId).then(setChat).catch(() => undefined);
+      void api.listModels().then(setModels).catch(() => undefined);
+    }).then((unlisten) => {
+      stop = unlisten;
+    });
+    return () => stop();
+  }, [chatId]);
 
   useEffect(() => {
     void (async () => {
@@ -413,14 +425,17 @@ export function ChatScreen() {
             )}
           </div>
           {pendingApproval ? (
-            <div className="choice-row">
-              <span className="hint">Allow this action?</span>
-              <button type="button" className="primary" onClick={() => void api.resolveToolApproval(pendingApproval, true)}>
-                Allow
-              </button>
-              <button type="button" className="secondary" onClick={() => void api.resolveToolApproval(pendingApproval, false)}>
-                Deny
-              </button>
+            <div className="approval-card">
+              <strong>{pendingStep(chat, pendingApproval)?.name === "update_settings" ? "Change setting" : "Allow this action?"}</strong>
+              <p>{pendingStep(chat, pendingApproval)?.arguments}</p>
+              <div className="choice-row">
+                <button type="button" className="primary" onClick={() => void api.resolveToolApproval(pendingApproval, true)}>
+                  {pendingStep(chat, pendingApproval)?.name === "update_settings" ? "Approve" : "Allow"}
+                </button>
+                <button type="button" className="secondary" onClick={() => void api.resolveToolApproval(pendingApproval, false)}>
+                  Deny
+                </button>
+              </div>
             </div>
           ) : null}
           {error ? <p className="banner">{error}</p> : null}
@@ -428,6 +443,10 @@ export function ChatScreen() {
       </section>
     </div>
   );
+}
+
+function pendingStep(chat: Chat | null, id: string) {
+  return chat?.messages.flatMap((message) => message.toolSteps ?? []).find((step) => step.id === id);
 }
 
 function paint(

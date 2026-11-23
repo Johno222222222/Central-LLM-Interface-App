@@ -1,3 +1,4 @@
+mod app_tools;
 mod commands;
 mod keychain;
 mod runtime;
@@ -14,6 +15,11 @@ use tauri::Manager;
 use crate::runtime::{apply_health, health_snapshot, probe_origin, stop, sync_runtime};
 use std::sync::atomic::AtomicBool;
 
+pub struct UiState {
+    pub screen: String,
+    pub focus: String,
+}
+
 pub struct AppState {
     pub store: Mutex<Store>,
     pub client: reqwest::Client,
@@ -21,6 +27,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    pub ui: Mutex<UiState>,
 }
 
 pub fn run() {
@@ -49,6 +56,10 @@ pub fn run() {
                 data_dir: data,
                 cancels: Mutex::new(HashMap::new()),
                 approvals: Mutex::new(HashMap::new()),
+                ui: Mutex::new(UiState {
+                    screen: "chat".into(),
+                    focus: String::new(),
+                }),
             });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -112,6 +123,7 @@ pub fn run() {
             commands::save_feedback,
             commands::export_feedback,
             commands::set_model_context,
+            commands::set_ui_state,
             commands::stop_generation,
             commands::resolve_tool_approval,
             commands::detect_lu_folder,
